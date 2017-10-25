@@ -404,7 +404,7 @@ VSYNC_ISR()
   
   // field count
   //
-  ultohex(TopRow+10,fieldCount);
+  ultodec(TopRow+10,fieldCount,10);
 
   // update display top row
   //
