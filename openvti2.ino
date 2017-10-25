@@ -61,8 +61,6 @@ I included zip files as well for original library
 
 #define VERSION  5
 
-#define TEST1 1
-
 typedef enum CountSource
 {
   TCNT,
@@ -119,24 +117,12 @@ MAX7456 OSD( osdChipSelect );
 volatile bool EnableOverlay = false;
 volatile unsigned long fieldCount;
 
-volatile int fieldParity;            // 1=> field 1, 2=> field 2
+volatile int fieldParity = 0;            // 1=> field 1, 2=> field 2  (0 => not yet set)
 bool blnPE1 = false;
 bool blnPE2 = false;
 
 volatile unsigned long tk_VSYNC;      // vsync "time" = 2mhz ticks
 volatile unsigned long tk_HSYNC;      // hsync "time" = 2mhz ticks
-
-#ifdef TEST1
-// testing...
-//
-volatile unsigned long hMin = 0xFFFFFFFF;
-volatile unsigned long hMax = 0;
-volatile unsigned long vMin = 0xFFFFFFFF;
-volatile unsigned long vMax = 0;
-volatile unsigned long hvMin = 0xFFFFFFFF;
-volatile unsigned long hvMax = 0;
-// ...testing
-#endif
 
 //***********************
 //  Timing
@@ -149,7 +135,11 @@ volatile unsigned short timer1_ov;    // timer 1 overflow count = high word of "
 //************
 //  OSD rows
 //
-char TopRow[30] = {0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09};
+char TopRow[30];
+uint16_t TopRow_Addr = 30;            // Top Row is row 1
+
+char BottomRow[30];
+uint16_t BottomRow_Addr = 9 * 30;    // Top Row is row 11 (good for NTSC)
 
 //========================================
 //  SETUP ROUTINE
@@ -164,6 +154,7 @@ void setup() {
   for (int i = 0; i< 30; i++) 
   {
     TopRow[i] = 0x00;
+    BottomRow[i] = 0x00;
   }
 
   //************
@@ -218,9 +209,9 @@ void setup() {
   timer1_ov = 0;                            // reset overflow count
   TIMSK1 = (1 << ICIE1) | (1 << TOIE1);     // enable ICP & overflow
 
-  // wait 500ms before tracking VSYNC
+  // wait 50ms before tracking VSYNC
   //
-  delay(500);
+  delay(50);
   
   // VSYNC
   //
@@ -230,6 +221,12 @@ void setup() {
   VSYNC_CFG_PCMSK();
   VSYNC_CFG_EIMSK();
 
+  // reset error flags
+  //
+  delay(50);
+  blnPE1 = false;
+  blnPE2 = false;
+  
   EnableOverlay = true;   // start the overlay...
 
   
@@ -285,21 +282,6 @@ VSYNC_ISR()
     timeDiff = 0 - (tk_HSYNC - tk_VSYNC);
   }
 
-#ifdef TEST1
-  // testing... 
-  // vsync - hsync intervals
-  //
-  if (timeDiff < hvMin)
-  {
-    hvMin = timeDiff;
-  }
-  if (timeDiff > hvMax)
-  {
-    hvMax = timeDiff;
-  }
-  // ...testing
-#endif
- 
   prevParity = fieldParity;
   if ((timeDiff < 30) || (timeDiff > 100))    // < 15ms or > 50ms
   {
@@ -327,47 +309,6 @@ VSYNC_ISR()
     ParityError = false;
   }
 
-#ifdef TEST1
-  // testing ...
-  //
-
-  // vsync intervals
-  //
-  if (tk_VSYNC >= timePrev)
-  {
-    timeDiff = tk_VSYNC - timePrev;
-  }
-  else
-  {  
-    timeDiff = 0 - (timePrev - tk_VSYNC);
-  }
-
-  if (timeDiff < vMin)
-  {
-    vMin = timeDiff;
-  }
-
-  if (timeDiff > vMax)
-  {
-    vMax = timeDiff;
-  }
-  // ...testing
-#endif
-
-#ifdef TEST1
-  // testing
-  //
-  if (fieldCount == 10)
-  {
-    vMin = 0xFFFFFFFF;
-    vMax = 0;
-    hMin = 0xFFFFFFFF;
-    hMax = 0;
-    hvMin = 0xFFFFFFFF;
-    hvMax = 0;
-    blnPE1 = false;
-    blnPE2 = false;
-  }
 
   //**********
   //  write overlay?
@@ -404,37 +345,13 @@ VSYNC_ISR()
   
   // field count
   //
-  ultodec(TopRow+10,fieldCount,10);
+  ultodec(BottomRow+18,fieldCount,6);
 
-  // update display top row
+  // update display
   //
-  OSD.sendArray(30,TopRow,30);
+  OSD.sendArray(TopRow_Addr,TopRow,30);
+  OSD.sendArray(BottomRow_Addr,BottomRow,30);
 
-  
-  if ((fieldCount % 60) == 0)
-  {
-    noInterrupts();
-
-    OSD.setCursor(10,3);
-    OSD.print(vMin);
-    OSD.setCursor(10,4);
-    OSD.print(vMax);
-    
-    OSD.setCursor(10,6);
-    OSD.print(hMin);
-    OSD.setCursor(10,7);
-    OSD.print(hMax);
-    
-    OSD.setCursor(10,9);
-    OSD.print(hvMin);
-    OSD.setCursor(10,10);
-    OSD.print(hvMax);
-
-    interrupts();
-
-  }
-  // ...testing
-#endif
  
 } // end of VSYNC_ISR
 
@@ -457,29 +374,6 @@ HSYNC_ISR()
   timePrev = tk_HSYNC;
   tk_HSYNC = timeCurrent;
 
-#ifdef TEST1
-  // testing ...
-  if (timeCurrent >= timePrev)
-  {
-    timeDiff = timeCurrent - timePrev;
-  }
-  else
-  {
-      timeDiff = 0 - (timePrev - timeCurrent);
-  }
-
-  if (timeDiff < hMin)
-  {
-    hMin = timeDiff;
-  }
-
-  if (timeDiff > hMax)
-  {
-    hMax = timeDiff;
-  }
-
-  // ...testing
-#endif
 
 } // end of HSYNC_ISR
 
@@ -565,8 +459,8 @@ void ultohex(char *dest, unsigned long ul)
 } // end of ultohex
 
 //===========================================================================
-// ultodec - convert unsigned long to 10 decimal MAX7456 characters in a character array
-//    pad > 0 => pad with leading zeros to this min length 
+// ultodec - convert unsigned long to pad decimal MAX7456 characters in a character array
+//    pad with leading zeros to this min length 
 //===========================================================================
 void ultodec(char *dest, unsigned long ul, int pad)
 {
@@ -582,7 +476,7 @@ void ultodec(char *dest, unsigned long ul, int pad)
 
   pn= dest + 9;
 
-  for(int i = 0; i < 10; i++)
+  for(int i = 0; i < pad; i++)
   {
 
     // get lowest number/char
@@ -595,11 +489,6 @@ void ultodec(char *dest, unsigned long ul, int pad)
     //
     *pn = dec[remainder];
     pn--;
-
-    if ((divisor == 0) && (i >= pad))
-    {
-      break;
-    }
     
   } // end of for loop through the nibbles
   
