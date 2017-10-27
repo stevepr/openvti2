@@ -97,7 +97,7 @@ MAX7456 OSD( osdChipSelect );
 #define FIELD2TS_COL 17
 #define FIELD2TS_ROW BOTTOM_ROW
 
-#define FIELDTOT_COL 24
+#define FIELDTOT_COL 22
 #define FIELDTOT_ROW BOTTOM_ROW
 
 #define FIX_ROW TOP_ROW
@@ -385,17 +385,25 @@ VSYNC_ISR()
   
   // field count
   //
-  ultodec(&(BottomRow[FIELDTOT_COL - 6]),fieldCount,6);
+  ultodec(BottomRow + FIELDTOT_COL,fieldCount,-6);
 
   // field time
   //
   if (fieldParity == 1)
   {
-    ultodec(BottomRow + (FIELD1TS_COL - 5), timeDiff, 5);
+    ultodec(BottomRow + FIELD1TS_COL, timeDiff, -4);  // write field 1 stamp
+    for (int i = 0; i < 4; i++)  // clear field 2 stamp
+    {
+      BottomRow[FIELD2TS_COL + i] = 0x00;
+    }
   }
   else
   {
-    ultodec(BottomRow + (FIELD2TS_COL - 5), timeDiff, 5);
+    ultodec(BottomRow + FIELD2TS_COL, timeDiff, -4);  // write field 2 stamp
+    for (int i = 0; i < 4; i++)  // clear field 1 stamp
+    {
+      BottomRow[FIELD1TS_COL + i] = 0x00;
+    }
   }
   
   // update display
@@ -531,27 +539,32 @@ void ultohex(char *dest, unsigned long ul)
 } // end of ultohex
 
 //===========================================================================
-// ultodec - convert unsigned long to pad decimal MAX7456 characters in a character array
-//    pad with leading zeros to this min length 
+// ultodec - convert unsigned long to decimal MAX7456 characters in a character array
+//    dest = ptr to destination of most significant char of decimal number
+//    ul = unsigned long value to convert
+//    len = # of chars to write in destination (pos => leading zeros, negative => leading spaces) 
 //===========================================================================
-void ultodec(char *dest, unsigned long ul, int pad)
+void ultodec(char *dest, unsigned long ul, int len)
 {
 
   char dec[10] = {0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09};
 
   char *pn;
 
+  int pad;
   unsigned long divisor;
   unsigned short remainder;
   
   unsigned long nibble;
 
-  pn= dest + 9;
+  pad = abs(len);   // # of chars to write
+  
+  pn= dest + (pad - 1);
 
   for(int i = 0; i < pad; i++)
   {
 
-    // get lowest number/char
+    // get least significan number/char
     //
     divisor = ul/10;
     remainder = ul - (divisor * 10);
@@ -559,7 +572,16 @@ void ultodec(char *dest, unsigned long ul, int pad)
     
     // set char & move
     //
-    *pn = dec[remainder];
+    if ((remainder == 0) && (ul == 0) && (len > 0))
+    {
+      // we have run out of digits, time to pad with spaces now
+      //
+      *pn = 0x00;
+    }
+    else
+    {
+      *pn = dec[remainder];
+    }
     pn--;
     
   } // end of for loop through the nibbles
