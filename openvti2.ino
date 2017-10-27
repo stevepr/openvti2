@@ -73,14 +73,16 @@ const unsigned long gpsBaud = 9600;
 // GPS
 // we are going to use the hardware serial port for gps
 #define gpsSerial Serial
+bool gpsStatus = false;
 
 // OSD object
 //
 MAX7456 OSD( osdChipSelect );
 
 // location of UI elements
-#define TOP_ROW 0
-#define BOTTOM_ROW  12
+#define TOP_ROW 1
+//#define BOTTOM_ROW  12
+#define BOTTOM_ROW  11      // ***for testing
 
 // solid character that blinks each PPS we receive
 #define PPSCHAR_COL 1
@@ -95,7 +97,7 @@ MAX7456 OSD( osdChipSelect );
 #define FIELD2TS_COL 17
 #define FIELD2TS_ROW BOTTOM_ROW
 
-#define FIELDTOT_COL 22
+#define FIELDTOT_COL 24
 #define FIELDTOT_ROW BOTTOM_ROW
 
 #define FIX_ROW TOP_ROW
@@ -108,7 +110,7 @@ MAX7456 OSD( osdChipSelect );
 #define TIME_COL 3
 
 // pixel offset of display    
-#define OSD_X_OFFSET -4
+#define OSD_X_OFFSET  0
 #define OSD_Y_OFFSET  0
 
 //************
@@ -125,12 +127,13 @@ volatile unsigned long tk_VSYNC;      // vsync "time" = 2mhz ticks
 volatile unsigned long tk_HSYNC;      // hsync "time" = 2mhz ticks
 
 //***********************
-//  Timing
+//  Time
 //
 volatile unsigned short timer1_ov;    // timer 1 overflow count = high word of "time" (32ms per overflow)
 #define Timer_Second 2000000          // timer1 is running at about 2mhz
 #define Timer_Milli 2000              // approx ticks per millisecond
 
+volatile unsigned long tk_PPS;        // tick "time" of most recent PPS int
 
 //************
 //  OSD rows
@@ -156,6 +159,17 @@ void setup() {
     TopRow[i] = 0x00;
     BottomRow[i] = 0x00;
   }
+
+  //************
+  // Init GPS
+  //
+#if 0
+  gpsStatus = gpsInit();
+  if (!gpsStatus)
+  {
+    BottomRow[1] = 0x22;    // flax GPS fail with 'X'
+  }
+#endif
 
   //************
   //  Init OSD
@@ -188,9 +202,19 @@ void setup() {
 
   //*************
   // setup interrupt sources
+  //  * PPS
   //  * VSYNC
   //  * HSYNC
-  //  * PPS
+  //  
+
+  // PPS
+  // Connected to INT1 interrupt as rising edge trigger
+  //
+  PPS_CFG_INPUT();
+  PPS_CFG_EICRA();
+  PPS_CFG_PCMSK();
+  PPS_CFG_EIMSK();
+  
   
   // HSYNC
   //  connected to Timer1 ICP falling edge (start of horizontal blanking)
@@ -229,7 +253,7 @@ void setup() {
   
   EnableOverlay = true;   // start the overlay...
 
-  
+ 
 } // end of setup
 
 //========================================
@@ -264,6 +288,15 @@ VSYNC_ISR()
   timePrev = tk_VSYNC;
   tk_VSYNC = GetTicks(TCNT);
   
+
+  //**********
+  //  write overlay?
+  //
+  if (!EnableOverlay)
+  {
+    return;   // nope, leave now...
+  }
+
   // increment field count
   //
   fieldCount++;
@@ -309,14 +342,21 @@ VSYNC_ISR()
     ParityError = false;
   }
 
-
-  //**********
-  //  write overlay?
+  //**************
+  //  determine field time delay from latest PPS
   //
-  if (!EnableOverlay)
+  if (tk_VSYNC >= tk_PPS)
   {
-    return;   // nope, leave now...
+    timeDiff = tk_VSYNC - tk_PPS;
   }
+  else
+  {
+    timeDiff = 0 - (tk_PPS - tk_VSYNC);
+  }
+
+  // convert ticks to 0.1 ms
+  //
+  timeDiff /= (Timer_Milli / 10);
 
   //***
   //  ENABLE interrupts again
@@ -345,12 +385,23 @@ VSYNC_ISR()
   
   // field count
   //
-  ultodec(BottomRow+18,fieldCount,6);
+  ultodec(&(BottomRow[FIELDTOT_COL - 6]),fieldCount,6);
 
+  // field time
+  //
+  if (fieldParity == 1)
+  {
+    ultodec(BottomRow + (FIELD1TS_COL - 5), timeDiff, 5);
+  }
+  else
+  {
+    ultodec(BottomRow + (FIELD2TS_COL - 5), timeDiff, 5);
+  }
+  
   // update display
   //
-  OSD.sendArray(TopRow_Addr,TopRow,30);
-  OSD.sendArray(BottomRow_Addr,BottomRow,30);
+  OSD.sendArray(TOP_ROW*30,TopRow,30);
+  OSD.sendArray(BOTTOM_ROW*30,BottomRow,30);
 
  
 } // end of VSYNC_ISR
@@ -377,6 +428,27 @@ HSYNC_ISR()
 
 } // end of HSYNC_ISR
 
+//===============================
+//  PPS ISR
+//===============================
+PPS_ISR()
+{
+  unsigned long timeCurrent;
+  unsigned long timePrev;
+  unsigned long timeDiff;
+
+  // get the HSYNC time from the input capture register
+  //   falling edge => start of Horizontal blanking
+  //
+  timeCurrent = GetTicks(TCNT);
+
+  // 
+  //
+  timePrev = tk_PPS;
+  tk_PPS = timeCurrent;
+
+
+} // end of PPS_ISR
 
 //========================================
 // ISR for Timer 1 overflow

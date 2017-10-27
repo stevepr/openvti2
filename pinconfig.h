@@ -115,7 +115,7 @@
 //   - enable the EICRA ints for INT1
 //   - disable the PCMSK for PCINT19
 //
-#define PPS_CFG_EICRA()     (EICRA = (EICRA | 1<<ISC11 | 1<ISC10)
+#define PPS_CFG_EICRA()     (EICRA = (EICRA | 1<<ISC11 | 1<ISC10))
 #define PPS_CFG_EIMSK()     (EIMSK |= (1 << INT1))
 #define PPS_CFG_PCMSK()     (PCMSK2 &= ~(1 << PCINT19))
 #define PPS_ISR()           ISR(INT1_vect)
