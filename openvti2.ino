@@ -134,6 +134,7 @@ volatile unsigned short timer1_ov;    // timer 1 overflow count = high word of "
 #define Timer_Milli 2000              // approx ticks per millisecond
 
 volatile unsigned long tk_PPS;        // tick "time" of most recent PPS int
+volatile bool pps_now = false;
 
 //************
 //  OSD rows
@@ -278,7 +279,7 @@ void loop() {
 //===============================
 VSYNC_ISR()
 {
-  int prevParity;
+  volatile int prevParity;
   bool ParityError;
   unsigned long timeDiff;
   unsigned long timePrev;
@@ -316,7 +317,7 @@ VSYNC_ISR()
   }
 
   prevParity = fieldParity;
-  if ((timeDiff < 30) || (timeDiff > 100))    // < 15ms or > 50ms
+  if ((timeDiff < 40) || (timeDiff > 100))    // < 20ms or > 50ms
   {
     fieldParity = 1;
   }
@@ -328,7 +329,7 @@ VSYNC_ISR()
   if (fieldParity == prevParity)
   {
     ParityError = true;
-    if (fieldParity = 1)
+    if (fieldParity == 1)
     {
       blnPE1 = true;
     }
@@ -358,14 +359,21 @@ VSYNC_ISR()
   //
   timeDiff /= (Timer_Milli / 10);
 
-  //***
-  //  ENABLE interrupts again
-  //
-  interrupts();
-
   //**********************
   //  update display
   //
+
+  // pps test...
+  //
+  if (pps_now)
+  {
+    BottomRow[0] = 0xFA;
+    pps_now = false;
+  }
+  else
+  {
+    BottomRow[0] = 0x00;
+  }
 
   // field parity
   //
@@ -406,6 +414,11 @@ VSYNC_ISR()
     }
   }
   
+  //***
+  //  ENABLE interrupts again
+  //
+  interrupts();
+
   // update display
   //
   OSD.sendArray(TOP_ROW*30,TopRow,30);
@@ -455,7 +468,9 @@ PPS_ISR()
   timePrev = tk_PPS;
   tk_PPS = timeCurrent;
 
-
+  //
+  pps_now = true;
+  
 } // end of PPS_ISR
 
 //========================================
