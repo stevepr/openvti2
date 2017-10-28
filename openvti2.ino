@@ -68,11 +68,14 @@ typedef enum CountSource
 };
 
 // Global Constants & Variables ////////////////////////////////////////////////////////////
-const unsigned long gpsBaud = 9600;                                              
+const unsigned long gpsBaud = 9600;       
+
+// Startup Mode
+//
+bool StartupExec;       // true => run , false => programming (don't do anything this time)
   
 // GPS
 // we are going to use the hardware serial port for gps
-#define gpsSerial Serial
 bool gpsStatus = false;
 
 // OSD object
@@ -150,6 +153,23 @@ uint16_t BottomRow_Addr = 9 * 30;    // Top Row is row 11 (good for NTSC)
 //========================================
 void setup() {
 
+  //**************
+  //  check startup mode
+  //
+#if 1
+  STARTUP_CFG_INPUT();
+  if (STARTUP_READ())
+  {
+    StartupExec = true;
+  }
+  else
+  {
+    // just programming - leave now
+    StartupExec = false;
+    return;
+  }
+#endif
+
   //************
   //  General init
   //
@@ -164,12 +184,8 @@ void setup() {
   //************
   // Init GPS
   //
-#if 0
+#if 1
   gpsStatus = gpsInit();
-  if (!gpsStatus)
-  {
-    BottomRow[1] = 0x22;    // flax GPS fail with 'X'
-  }
 #endif
 
   //************
@@ -362,6 +378,11 @@ VSYNC_ISR()
   //**********************
   //  update display
   //
+
+  if (!gpsStatus)
+  {
+    BottomRow[1] = gpsStatus;    // flax GPS fail with 'X'
+  }
 
   // pps test...
   //
@@ -606,7 +627,13 @@ void ultodec(char *dest, unsigned long ul, int len)
 //**********************************************************************************************************
 // NEO 6 GPS routines
 //**********************************************************************************************************
-//#define gpsSerial Serial1
+#define gpsSerial Serial
+#define gps_OK        0
+#define gps_E_RMC     1
+#define gps_E_GGA     2
+#define gps_E_DTM     3
+#define gps_E_PUBX04  4
+#define gps_E_CFGTP   5
 
 //=================================================
 //  gpsInit - initialize GPS device
@@ -621,12 +648,28 @@ void ultodec(char *dest, unsigned long ul, int len)
 //        $PUBX,04
 //    
 //=================================================
-bool gpsInit()
+int gpsInit()
 {
-  uint8_t enableRMC[] = {0x06, 0x01, 0x03, 0x00, 0xF0, 0x04, 0x01};    // Set GPRMC rate on current target
-  uint8_t enableGGA[] = {0x06, 0x01, 0x03, 0x00, 0xF0, 0x00, 0x01};    // Set GPGGA rate on current target
-  uint8_t enableDTM[] = {0x06, 0x01, 0x03, 0x00, 0xF0, 0x0A, 0x01};    // Set GPDTM rate on current target
+  uint8_t enableRMC[] = {0x06, 0x01, 0x03, 0x00, 0xF0, 0x04, 0x01};       // Set GPRMC rate on current target
+  uint8_t enableGGA[] = {0x06, 0x01, 0x03, 0x00, 0xF0, 0x00, 0x01};       // Set GPGGA rate on current target
+  uint8_t enableDTM[] = {0x06, 0x01, 0x03, 0x00, 0xF0, 0x0A, 0x01};       // Set GPDTM rate on current target
   uint8_t enablePUBX04[] = {0x06, 0x01, 0x03, 0x00, 0xF1, 0x04, 0x01};    // Set PUBX,04 rate on current target
+
+  uint8_t configTimepulse[] = {0x06, 0x07, 0x14, 0x00,        //   configure timepulse
+                          0x40, 0x42, 0x0F, 0x00,             // time interval = 1,000,000 us
+                          0xA0, 0x86, 0x01, 0x00,             // pulse length = 100,000 us = 100ms
+                          0x01,                               // positive pulse
+                          0x00,                               // align to UTC
+                          0x00,                               // time pulse only when sync'd to valid GPS
+                          0x00,                               // reserved
+                          0x00, 0x00,                         // Antenna cable delay
+                          0x00, 0x00,                         // Receiver RF group delay
+                          0x00, 0x00, 0x00, 0x00              // user time function delay
+                          };
+                          
+  // 9600 NMEA is the default rate for the GPS
+  //
+  gpsSerial.begin(9600);
   
   //********************************
   //  TURN OFF everything to keep the serial port quiet
@@ -649,28 +692,36 @@ bool gpsInit()
   ubxSend(enableRMC,sizeof(enableRMC)/sizeof(uint8_t));
   if (!ubxGetAck(enableRMC))
   {
-    Serial.println("RMC enable failed on ACK");
+    return gps_E_RMC;
   }
+
   
   ubxSend(enableGGA,sizeof(enableGGA)/sizeof(uint8_t));
   if (!ubxGetAck(enableGGA))
   {
-    Serial.println("GGA enable failed on ACK");
+    return gps_E_GGA;
   }
 
   ubxSend(enableDTM,sizeof(enableDTM)/sizeof(uint8_t));
   if (!ubxGetAck(enableDTM))
   {
-    Serial.println("DTM enable failed on ACK");
+    return gps_E_DTM;
   }
 
   ubxSend(enablePUBX04,sizeof(enablePUBX04)/sizeof(uint8_t));
   if (!ubxGetAck(enablePUBX04))
   {
-    Serial.println("PUBX04 enable failed on ACK");
+    return gps_E_PUBX04;
   }
+#if 0
+  ubxSend(configTimepulse,sizeof(configTimepulse)/sizeof(uint8_t));
+  if (!ubxGetAck(configTimepulse))
+  {
+    return gps_E_CFGTP;
+  }
+#endif
 
-  return true;
+  return gps_OK;
   
 } // end of gpsInit
 
@@ -803,7 +854,7 @@ bool ubxGetAck(uint8_t *MSG)
     {
       return(false);
     }
-  }  // end of checking the recevied packet
+  }  // end of checking the received packet
 
   //*********************
   //  all OK

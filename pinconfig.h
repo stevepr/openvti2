@@ -50,6 +50,18 @@
 
 /////////////////////////  defines for init and access /////////////////////////
 
+  // startup mode
+  //    GND / 0 => programming mode
+  //    GND / 1 => run mode
+  //
+#define STARTUP   7           // digital pin 7
+#define STARTUP_PIN   PD7     //
+#define STARTUP_DDR   DDRD
+#define STARTUP_PINR  PIND
+#define STARTUP_CFG_INPUT() (STARTUP_DDR &= ~_BV(STARTUP_PIN))
+#define STARTUP_READ() (STARTUP_PINR & _BV(STARTUP_PIN))
+ 
+
   // VSYNC 
   //  connected to edge triggered int
   //
@@ -101,7 +113,7 @@
 #endif
 
   // PPS
-  //  Connected to edge triggered INT1
+  //  Connected to edge triggered INT1 = digital pin 3
   //
 #define PPS         3
 #define PPS_PIN     PD3       // aka INT1 / PCINT19
