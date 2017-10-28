@@ -77,7 +77,7 @@
 //   - enable the EICRA ints for INT0
 //   - disable the PCMSK for PCINT18
 //
-#define VSYNC_CFG_EICRA()     (EICRA = ((EICRA & ~(1<<ISC01 | 1<ISC00)) | (1 << ISC01)))
+#define VSYNC_CFG_EICRA()     (EICRA = ((EICRA & 0b11111100) | 0b00000010))
 #define VSYNC_CFG_EIMSK()     (EIMSK |= (1 << INT0))
 #define VSYNC_CFG_PCMSK()     (PCMSK2 &= ~(1 << PCINT18))
 #define VSYNC_ISR()           ISR(INT0_vect)
@@ -127,7 +127,7 @@
 //   - enable the EICRA ints for INT1
 //   - disable the PCMSK for PCINT19
 //
-#define PPS_CFG_EICRA()     (EICRA = (EICRA | 1<<ISC11 | 1<ISC10))
+#define PPS_CFG_EICRA()     (EICRA = (EICRA | 0b00001100))
 #define PPS_CFG_EIMSK()     (EIMSK |= (1 << INT1))
 #define PPS_CFG_PCMSK()     (PCMSK2 &= ~(1 << PCINT19))
 #define PPS_ISR()           ISR(INT1_vect)

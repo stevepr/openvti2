@@ -299,6 +299,7 @@ VSYNC_ISR()
   bool ParityError;
   unsigned long timeDiff;
   unsigned long timePrev;
+  uint8_t utmp;
   
   // get time
   //
@@ -383,7 +384,7 @@ VSYNC_ISR()
   {
     BottomRow[1] = gpsStatus;    // flax GPS fail with 'X'
   }
-
+  
   // pps test...
   //
   if (pps_now)
@@ -575,6 +576,26 @@ void ultohex(char *dest, unsigned long ul)
 } // end of ultohex
 
 //===========================================================================
+// bytetohex - convert byte to 2 hex MAX7456 characters in a character array
+//
+//===========================================================================
+void bytetohex(char *dest, uint8_t byt)
+{
+
+  char hex[16] = {0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0B,0x0C,0x0D,0x0E,0x0F,0x10};
+
+  uint8_t nibble;
+
+  nibble = (byt & 0xF0) >> 4;
+  *dest = hex[nibble];
+
+  dest++;
+  nibble = (byt & 0x0F);
+  *dest = hex[nibble];
+    
+} // end of ultohex
+
+//===========================================================================
 // ultodec - convert unsigned long to decimal MAX7456 characters in a character array
 //    dest = ptr to destination of most significant char of decimal number
 //    ul = unsigned long value to convert
@@ -658,6 +679,7 @@ int gpsInit()
   uint8_t configTimepulse[] = {0x06, 0x07, 0x14, 0x00,        //   configure timepulse
                           0x40, 0x42, 0x0F, 0x00,             // time interval = 1,000,000 us
                           0xA0, 0x86, 0x01, 0x00,             // pulse length = 100,000 us = 100ms
+//                          0x10, 0x27, 0x00, 0x00,             // pulse length = 10ms
                           0x01,                               // positive pulse
                           0x00,                               // align to UTC
                           0x00,                               // time pulse only when sync'd to valid GPS
@@ -713,13 +735,13 @@ int gpsInit()
   {
     return gps_E_PUBX04;
   }
-#if 0
+
   ubxSend(configTimepulse,sizeof(configTimepulse)/sizeof(uint8_t));
   if (!ubxGetAck(configTimepulse))
   {
     return gps_E_CFGTP;
   }
-#endif
+
 
   return gps_OK;
   
