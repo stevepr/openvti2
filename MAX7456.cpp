@@ -1944,12 +1944,13 @@
   // Sends a array of chars to the specified location in Display Memory via auto-increment mode
   //  * turns OFF all character attributes
   //  * NO char mapping from ASCII
-  //  *** Interrupts are left ENABLED during this routine
+  //  * this routine will enable interrupts
   //
   void MAX7456::sendArray(uint16_t uAddr, char *cArray, int len)
   {
     
-
+    noInterrupts();     // protect these writes
+    
     // clear autoincrement
     //
     if (inAutoIncrement)
@@ -1983,22 +1984,28 @@
     SPIObject->transfer( (uint8_t)(1 << MAX7456_DMM_AI) );          // Send value to store
     *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
 
+    interrupts();   // back on again
+    
     // write data from character array
     //
     for (int i = 0; i < len; i++)
     {
+      noInterrupts();
       *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
                                                 //   to enable slave SPI.
       SPIObject->transfer(cArray[i]);
       *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
+      interrupts();
     }
 
     // terminate autoincrement mode via 0xFF char
     //
+    noInterrupts();
     *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
                                                 //   to enable slave SPI.
     SPIObject->transfer( (uint8_t)0xFF );                
     *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
+    interrupts();
       
   } // end of sendArray
 
@@ -2043,7 +2050,37 @@
     }
       
   } // end of sendArray
-  
+
+  // copies array of ascii chars and converts to max7456 chars
+  //  dest = destination location for converted chars
+  //  src = source arracy
+  //  len = # of chars to convert
+  //
+  void MAX7456::atomax( uint8_t *dest, uint8_t *src, int len )
+  {
+    uint8_t tmp;
+    
+    while ( len > 0)
+    {
+      tmp = *src;
+      if (tmp >= 128)
+      {
+        tmp = 0;
+      }
+      else
+      {
+        tmp = defaultCodePage[tmp];
+      }
+
+      *dest = tmp;
+      
+      dest++;
+      src++;
+      len--;
+    }
+
+  } // end of atomax
+
 // Private Methods /////////////////////////////////////////////////////////////
 
   // Communicates via SPI to store a byte of data into a memory location 

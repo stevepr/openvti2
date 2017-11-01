@@ -267,6 +267,7 @@
       
       void          sendArray(uint16_t uAddr, char *cArray, int len);
       void          sendArray(char *cArray, int len);
+      void          atomax( uint8_t *dest, uint8_t *src, int len );
       
     private:
     
