@@ -146,6 +146,8 @@ volatile unsigned long tk_HSYNC;      // hsync "time" = 2mhz ticks
 
 #if 1
 volatile bool InVsync = false;
+volatile unsigned long saMin=0xFFFFFFFF;
+volatile unsigned long saMax=0x00;
 #endif
 
 //***********************
@@ -363,13 +365,6 @@ VSYNC_ISR()
   uint8_t utmp;
 
 
-#if 1
-  if (InVsync)
-  {
-    TestRow[2] = 0x20;
-  }
-#endif  
-
   // get time
   //
   timePrev = tk_VSYNC;
@@ -457,6 +452,17 @@ VSYNC_ISR()
   //**********************
   //  update display
   //
+
+#if 1
+  if (InVsync)
+  {
+    // oops! - leave now
+    TestRow[2] = 0x20;
+
+    return;
+  }
+#endif  
+
   if (!EnableOverlay)
   {
     return;   // nope, leave now...
@@ -558,10 +564,12 @@ VSYNC_ISR()
   }
 #endif
 
-#if 0
+#if 1
   // writeArray version
+  timePrev = GetTicks(TCNT);
   OSD.setCursor(0,TOP_ROW);
   OSD.writeArray(TopRow,30);
+  timeDiff = GetTicks(TCNT) - timePrev;
 
   OSD.setCursor(0,BOTTOM_ROW);
   OSD.writeArray(BottomRow,30);
@@ -570,12 +578,29 @@ VSYNC_ISR()
   OSD.writeArray(TestRow,30);
 #endif
 
-#if 1
+#if 0
+  timePrev = GetTicks(TCNT);
   OSD.sendArray(TOP_ROW*30,TopRow,30);
+  timeDiff = GetTicks(TCNT) - timePrev;
+  
   OSD.sendArray(BOTTOM_ROW*30,BottomRow,30);
 
 //  OSD.atomax(TestRow,nmeaSentence,15);
   OSD.sendArray(5*30,TestRow,30); // testing...
+#endif
+
+#if 1
+  if (timeDiff > saMax)
+  {
+    saMax = timeDiff;
+  }
+  if (timeDiff < saMin)
+  {
+    saMin = timeDiff;
+  }
+  ultodec(TestRow+5,saMin,5);
+  ultodec(TestRow+12,saMax,5);
+  
 #endif
 
 #if 1

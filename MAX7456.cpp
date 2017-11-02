@@ -2010,7 +2010,8 @@
   //
   void MAX7456::sendArray(uint16_t uAddr, uint8_t *cArray, int len)
   {
-        
+     uint8_t symbol;
+     
     // clear autoincrement so we can set the destination address in display memory
     //
 //    noInterrupts();
@@ -2056,10 +2057,14 @@
     //
     for (int i = 0; i < len; i++)
     {
-      
+      symbol = cArray[i];
+      if (symbol == 0xFF)
+      {
+        symbol = 0x00;      // cull out the break char which would turn off autoincrement
+      }
       *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
                                                 //   to enable slave SPI.
-      SPIObject->transfer(cArray[i]);
+      SPIObject->transfer(symbol);
       *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
     }
 
