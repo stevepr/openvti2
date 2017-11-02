@@ -2005,26 +2005,28 @@
   // Sends a array of chars to the specified location in Display Memory via auto-increment mode
   //  * turns OFF all character attributes
   //  * NO char mapping from ASCII
-  //  * this routine will enable interrupts
+  //  * this routine will enable interrupts and leaves with autoincrement OFF
+  //  **** do NOT let other OSD code interrupt this routine!
   //
   void MAX7456::sendArray(uint16_t uAddr, uint8_t *cArray, int len)
   {
         
     // clear autoincrement so we can set the destination address in display memory
     //
+//    noInterrupts();
     if (inAutoIncrement)
     {
-      noInterrupts();
       *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
                                                   //   to enable slave SPI.
       SPIObject->transfer( (uint8_t)0xFF );                     
       *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
       inAutoIncrement = false;
-      interrupts();
     }
+//    interrupts();
     
     // send starting adddress to DMH and DML
     //
+//    noInterrupts();
     *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
                                                 //   to enable slave SPI.
     SPIObject->transfer( MAX7456_DMAH_W );                // Send register address.
@@ -2036,30 +2038,41 @@
     SPIObject->transfer( MAX7456_DMAL_W );                // Send register address.
     SPIObject->transfer( (uint8_t)(uAddr) );          // Send value to store
     *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
-
+//    interrupts();
+    
     // set DMM : 16 bit autoincrement mode & no attributes
     //
-    noInterrupts();       // protect the auto-increment mode setup
+//    noInterrupts();       // protect the auto-increment mode setup
     *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
                                                 //   to enable slave SPI.
     SPIObject->transfer( MAX7456_DMM_W );                 // Send register address.
     SPIObject->transfer( (uint8_t)(1 << MAX7456_DMM_AI) );          // Send value to store
     *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
 
-    inAutoIncrement = true;
-    
-    interrupts();   // back on again
+    inAutoIncrement = true;   
+//    interrupts();   // back on again
     
     // write data from character array
     //
     for (int i = 0; i < len; i++)
     {
+      
       *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
                                                 //   to enable slave SPI.
       SPIObject->transfer(cArray[i]);
       *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
     }
-      
+
+    // write 0xFF to turn off autoincrement now
+    //
+//    noInterrupts();
+    *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
+                                                //   to enable slave SPI.
+    SPIObject->transfer( (uint8_t)0xFF );                     
+    *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
+    inAutoIncrement = false;
+//    interrupts();
+    
   } // end of sendArray
 
   //

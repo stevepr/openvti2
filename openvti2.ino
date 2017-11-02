@@ -144,6 +144,10 @@ bool blnPE2 = false;
 volatile unsigned long tk_VSYNC;      // vsync "time" = 2mhz ticks
 volatile unsigned long tk_HSYNC;      // hsync "time" = 2mhz ticks
 
+#if 1
+volatile bool InVsync = false;
+#endif
+
 //***********************
 //  Time
 //
@@ -357,7 +361,15 @@ VSYNC_ISR()
   unsigned long timeDiff;
   unsigned long timePrev;
   uint8_t utmp;
-  
+
+
+#if 1
+  if (InVsync)
+  {
+    TestRow[2] = 0x20;
+  }
+#endif  
+
   // get time
   //
   timePrev = tk_VSYNC;
@@ -546,7 +558,7 @@ VSYNC_ISR()
   }
 #endif
 
-#if 1
+#if 0
   // writeArray version
   OSD.setCursor(0,TOP_ROW);
   OSD.writeArray(TopRow,30);
@@ -558,12 +570,16 @@ VSYNC_ISR()
   OSD.writeArray(TestRow,30);
 #endif
 
-#if 0
+#if 1
   OSD.sendArray(TOP_ROW*30,TopRow,30);
   OSD.sendArray(BOTTOM_ROW*30,BottomRow,30);
 
 //  OSD.atomax(TestRow,nmeaSentence,15);
   OSD.sendArray(5*30,TestRow,30); // testing...
+#endif
+
+#if 1
+  InVsync = false;
 #endif
 
 } // end of VSYNC_ISR
