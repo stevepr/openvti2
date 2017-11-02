@@ -2009,18 +2009,18 @@
   //
   void MAX7456::sendArray(uint16_t uAddr, uint8_t *cArray, int len)
   {
-    
-    noInterrupts();     // protect these writes
-    
-    // clear autoincrement
+        
+    // clear autoincrement so we can set the destination address in display memory
     //
     if (inAutoIncrement)
     {
+      noInterrupts();
       *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
                                                   //   to enable slave SPI.
       SPIObject->transfer( (uint8_t)0xFF );                     
       *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
       inAutoIncrement = false;
+      interrupts();
     }
     
     // send starting adddress to DMH and DML
@@ -2039,34 +2039,26 @@
 
     // set DMM : 16 bit autoincrement mode & no attributes
     //
+    noInterrupts();       // protect the auto-increment mode setup
     *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
                                                 //   to enable slave SPI.
     SPIObject->transfer( MAX7456_DMM_W );                 // Send register address.
     SPIObject->transfer( (uint8_t)(1 << MAX7456_DMM_AI) );          // Send value to store
     *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
 
+    inAutoIncrement = true;
+    
     interrupts();   // back on again
     
     // write data from character array
     //
     for (int i = 0; i < len; i++)
     {
-      noInterrupts();
       *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
                                                 //   to enable slave SPI.
       SPIObject->transfer(cArray[i]);
       *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
-      interrupts();
     }
-
-    // terminate autoincrement mode via 0xFF char
-    //
-    noInterrupts();
-    *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
-                                                //   to enable slave SPI.
-    SPIObject->transfer( (uint8_t)0xFF );                
-    *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
-    interrupts();
       
   } // end of sendArray
 
@@ -2078,6 +2070,7 @@
     //
     if (!inAutoIncrement)
     {
+      noInterrupts();       // protect the writes to turn on autoincr
       // enable Max7456 comm
       //
       *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
@@ -2092,6 +2085,7 @@
       // disable Max7456 comm
       //
       *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
+      interrupts();     // back on again
     }
     
 
