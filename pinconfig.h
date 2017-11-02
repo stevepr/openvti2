@@ -96,22 +96,6 @@
 
 #define HSYNC_ISR() ISR(TIMER1_CAPT_vect)
 
-
-#if 0
-#define HSYNC 4
-#define HSYNC_PIN   PD4       // aka PCINT20
-#define HSYNC_DDR   DDRD
-#define HSYNC_PINR  PIND
-#define HSYNC_CFG_INPUT() (HSYNC_DDR &= ~_BV(HSYNC_PIN))
-#define HSYNC_READ() (HSYNC_PINR & _BV(HSYNC_PIN))
-
-// macros to enable the pin change int for HSYNC
-//
-#define HSYNC_CFG_PCMSK()     (PCMSK2 |= (1 << PCINT20))
-#define HSYNC_CFG_PCICR()     (PCICR |= (1 << PCIE2))
-#define HSYNC_ISR() ISR(PCINT2_vect)
-#endif
-
   // PPS
   //  Connected to edge triggered INT1 = digital pin 3
   //
