@@ -264,7 +264,7 @@
       int8_t         cursorColumn();
       int8_t         cursorRow();
 
-     
+      void          writeArray(uint8_t* , int);
       void          sendArray(uint16_t uAddr, uint8_t* cArray, int len);
       void          sendArray(uint8_t* cArray, int len);
       void          atomax( uint8_t* , uint8_t* , int );

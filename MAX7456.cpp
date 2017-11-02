@@ -1942,6 +1942,66 @@
 // SBP Addition /////////////////////////////////////////////////////////////////////////////////
 
 
+  // Write an array of char to the MAX7456 display at the x and y coordinate stored 
+  // previously. char are assumed to be in MAX7456 code page already. Caution! For performance reasons, this function does not 
+  // check for resetIsBusy() condition, and thus should not be used until
+  // after a reset has completed.
+  void MAX7456::writeArray( 
+                      uint8_t *sArray , int len
+                    ) 
+  {
+    uint8_t symbol;
+    
+    if (!cursorValid)                           // If invalid location (or 
+    {                                           //   if begun is false),
+      increment();                              // move cursor anyway,
+      setWriteError();                          // throw error, and 
+      return;                                 // don't write anything.
+    }
+    
+    // Instantiate local variables:
+    uint16_t u2address = 0;
+        
+    // Update display memory address as needed:
+    if (badIncrement ||                         // If new location,
+        !inAutoIncrement ||                     // or no longer in AI,
+        symbol == 0xFF)                         // or if break symbol,
+    {
+      u2address += cursorY;
+      u2address += shiftRows;                   // shift for vsafe modes,
+      u2address *= MAX7456_COLS_D;              // scale rows to address,
+      u2address += cursorX;
+      u2address += shiftColumns;                // shift for vsafe modes,
+      
+      send( MAX7456_DMAH_W,                     // set the higher byte of the
+            (uint8_t)(u2address >> 8) );        //   display address,
+      send( MAX7456_DMAL_W,                     // set the lower byte of the
+            (uint8_t)(u2address) );             //   display address,
+      badIncrement = false;                     // note sucessful relocation.
+    }
+
+    for (int i = 0; i < len; i++)
+    {
+      symbol = sArray[i];
+      // Write to display memory:
+      if (symbol != 0xFF) {                       // If not attempting to write 
+                                                  //   the break character,
+        send( symbol );                           // write the symbol in 
+                                                  //   autoincrement mode;
+      }
+      else                                        // Otherwise,
+      {
+        send( MAX7456_DMDI_W,                     // write the symbol normally.
+              symbol );
+      }
+      
+      // Increment cursor:
+      increment();
+    }
+           
+  }
+  // end writeArray()
+
   // Sends a array of chars to the specified location in Display Memory via auto-increment mode
   //  * turns OFF all character attributes
   //  * NO char mapping from ASCII

@@ -526,7 +526,7 @@ VSYNC_ISR()
   // update display
   //
 
-#if 1
+#if 0
   OSD.setCursor(0,TOP_ROW);
   for(int i = 0; i < 30; i++)
   {
@@ -546,7 +546,7 @@ VSYNC_ISR()
   }
 #endif
 
-#if 0
+#if 1
   // writeArray version
   OSD.setCursor(0,TOP_ROW);
   OSD.writeArray(TopRow,30);
