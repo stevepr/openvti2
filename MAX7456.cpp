@@ -1941,6 +1941,7 @@
   
 // SBP Addition /////////////////////////////////////////////////////////////////////////////////
 
+
   // Sends a array of chars to the specified location in Display Memory via auto-increment mode
   //  * turns OFF all character attributes
   //  * NO char mapping from ASCII

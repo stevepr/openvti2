@@ -335,7 +335,7 @@ void loop() {
   {
     // get & parse serial data from GPS
     //
-#if 0
+#if 1
     ReadGPS();
 #endif
 
@@ -526,7 +526,7 @@ VSYNC_ISR()
   // update display
   //
 
-#if 0
+#if 1
   OSD.setCursor(0,TOP_ROW);
   for(int i = 0; i < 30; i++)
   {
@@ -546,7 +546,19 @@ VSYNC_ISR()
   }
 #endif
 
-#if 1
+#if 0
+  // writeArray version
+  OSD.setCursor(0,TOP_ROW);
+  OSD.writeArray(TopRow,30);
+
+  OSD.setCursor(0,BOTTOM_ROW);
+  OSD.writeArray(BottomRow,30);
+
+  OSD.setCursor(0,5);
+  OSD.writeArray(TestRow,30);
+#endif
+
+#if 0
   OSD.sendArray(TOP_ROW*30,TopRow,30);
   OSD.sendArray(BOTTOM_ROW*30,BottomRow,30);
 
