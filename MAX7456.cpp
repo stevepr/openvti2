@@ -1946,7 +1946,7 @@
   //  * NO char mapping from ASCII
   //  * this routine will enable interrupts
   //
-  void MAX7456::sendArray(uint16_t uAddr, char *cArray, int len)
+  void MAX7456::sendArray(uint16_t uAddr, uint8_t *cArray, int len)
   {
     
     noInterrupts();     // protect these writes
@@ -2010,7 +2010,7 @@
   } // end of sendArray
 
   //
-  void MAX7456::sendArray(char *cArray, int len)
+  void MAX7456::sendArray(uint8_t *cArray, int len)
   {
     
     // clear autoincrement

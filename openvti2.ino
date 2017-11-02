@@ -61,7 +61,7 @@ I included zip files as well for original library
 
 #define VERSION  5
 
-typedef enum CountSource
+enum CountSource
 {
   TCNT,
   ICR
@@ -73,14 +73,27 @@ const unsigned long gpsBaud = 9600;
 // Startup Mode
 //
 bool StartupExec;       // true => run , false => programming (don't do anything this time)
-  
-// GPS
-// we are going to use the hardware serial port for gps
-bool gpsStatus = false;
+
+
+//***************
+// OSD info
+//
 
 // OSD object
 //
 MAX7456 OSD( osdChipSelect );
+
+//  OSD rows
+//
+uint8_t TopRow[30];
+uint16_t TopRow_Addr = 30;            // Top Row is row 1
+
+uint8_t BottomRow[30];
+uint16_t BottomRow_Addr = 9 * 30;    // Top Row is row 11 (good for NTSC)
+
+#if 1
+uint8_t TestRow[30];
+#endif
 
 // location of UI elements
 #define TOP_ROW 1
@@ -116,13 +129,15 @@ MAX7456 OSD( osdChipSelect );
 #define OSD_X_OFFSET  0
 #define OSD_Y_OFFSET  0
 
-//************
+//
 // Video info
 //
 volatile bool EnableOverlay = false;
 volatile unsigned long fieldCount;
 
-volatile int fieldParity = 0;            // 1=> field 1, 2=> field 2  (0 => not yet set)
+volatile int fieldParity = 0;           // 1=> field 1, 2=> field 2  (0 => not yet set)
+volatile bool fieldSync;                // true => determine field 1 by timing, false => alternate fields on vsync
+
 bool blnPE1 = false;
 bool blnPE2 = false;
 
@@ -136,17 +151,41 @@ volatile unsigned short timer1_ov;    // timer 1 overflow count = high word of "
 #define Timer_Second 2000000          // timer1 is running at about 2mhz
 #define Timer_Milli 2000              // approx ticks per millisecond
 
-volatile unsigned long tk_PPS;        // tick "time" of most recent PPS int
-volatile bool pps_now = false;
+//******************
+// GPS info
+// 
+int gpsInitStatus;                        // GPS initialization status (0 => good)
+volatile bool gpsValid = false;           // true => GPS & PPS data currently valid
 
-//************
-//  OSD rows
+// PPS
 //
-char TopRow[30];
-uint16_t TopRow_Addr = 30;            // Top Row is row 1
+volatile unsigned long tk_PPS;        // tick "time" of most recent PPS int
+volatile bool pps_now = false;        // true => PPS just happened
+                                      
+volatile bool pps_valid = false;      // true => PPS is valid
+volatile bool time_UTC = false;       // true => time is current UTC , false => time is currently GPS
 
-char BottomRow[30];
-uint16_t BottomRow_Addr = 9 * 30;    // Top Row is row 11 (good for NTSC)
+volatile int pps_HH;                  //  current pps time (HH:MM:SS)
+volatile int pps_MM;
+volatile int pps_SS;
+
+volatile int pps_countdown;           // # of pps interrupts until pps valid - used for synch with NMEA data
+
+// GPS Serial data
+//
+
+#define NMEA_MAX  201    // max length of a nmea sentence
+
+uint8_t nmeaSentence[NMEA_MAX];       // current NMEA sentence
+int nmeaPos = -1;                     // position of next char in NMEA sentence, -1 => no current sentence
+
+typedef struct {
+  bool valid;
+  uint8_t hh[2];
+  uint8_t mm[2];
+  uint8_t ss[2];
+} nmea_rmc;
+nmea_rmc gpsRMC;
 
 //========================================
 //  SETUP ROUTINE
@@ -156,7 +195,6 @@ void setup() {
   //**************
   //  check startup mode
   //
-#if 1
   STARTUP_CFG_INPUT();
   if (STARTUP_READ())
   {
@@ -168,7 +206,6 @@ void setup() {
     StartupExec = false;
     return;
   }
-#endif
 
   //************
   //  General init
@@ -184,9 +221,9 @@ void setup() {
   //************
   // Init GPS
   //
-#if 1
-  gpsStatus = gpsInit();
-#endif
+  delay(50);        // wait a bit
+  gpsInitStatus = gpsInit();
+
 
   //************
   //  Init OSD
@@ -248,7 +285,12 @@ void setup() {
   TIFR1 = 0;                                // reset any pending ints
   PRR &= ~(1 << PRTIM1);                    // turn on timer 1
   timer1_ov = 0;                            // reset overflow count
-  TIMSK1 = (1 << ICIE1) | (1 << TOIE1);     // enable ICP & overflow
+//  TIMSK1 = (1 << ICIE1) | (1 << TOIE1);     // enable ICP & overflow
+#if 1
+  TIMSK1 = (1 << TOIE1);     // overflow
+  fieldParity = 1;
+  fieldSync = false;
+#endif
 
   // wait 50ms before tracking VSYNC
   //
@@ -256,18 +298,29 @@ void setup() {
   
   // VSYNC
   //
+#if 0
+//  fieldSync = true;       // look for field 1/ field 2
+#endif
+
   tk_VSYNC = 0;
   VSYNC_CFG_INPUT();
   VSYNC_CFG_EICRA();
   VSYNC_CFG_PCMSK();
   VSYNC_CFG_EIMSK();
 
-  // reset error flags
+  // now turn off hsync ICP interrupt
   //
   delay(50);
+#if 0  
+//  fieldSync = false;
+//  TIMSK1 &= !(1 << ICIE1);        // turn off ICP ints
+#endif
+
   blnPE1 = false;
   blnPE2 = false;
-  
+
+  OSD.home();
+  OSD.setCharEncoding(MAX7456_ASCII);
   EnableOverlay = true;   // start the overlay...
 
  
@@ -280,8 +333,12 @@ void loop() {
 
   while (true)
   {
-    // do nothing for now
+    // get & parse serial data from GPS
     //
+#if 0
+    ReadGPS();
+#endif
+
   }
 
 } // end of loop()
@@ -306,60 +363,69 @@ VSYNC_ISR()
   timePrev = tk_VSYNC;
   tk_VSYNC = GetTicks(TCNT);
   
-
-  //**********
-  //  write overlay?
-  //
-  if (!EnableOverlay)
-  {
-    return;   // nope, leave now...
-  }
-
   // increment field count
   //
   fieldCount++;
 
-  // Field parity detection
-  //    Field 1:
-  //      prev HSYNC (start of blanking) should be "close" to this VSYNC time
-  //        - must check for case where HSYNC happens just AFTER VSYNC (assume 64us period)
+  // determine field parity : field 1 or field 2 of a frame
   //
-  if (tk_VSYNC >= tk_HSYNC)
+  if (!fieldSync)
   {
-    timeDiff = tk_VSYNC - tk_HSYNC;
-  }
-  else
-  {
-    timeDiff = 0 - (tk_HSYNC - tk_VSYNC);
-  }
-
-  prevParity = fieldParity;
-  if ((timeDiff < 40) || (timeDiff > 100))    // < 20ms or > 50ms
-  {
-    fieldParity = 1;
-  }
-  else
-  {
-    fieldParity = 2;
-  }
-
-  if (fieldParity == prevParity)
-  {
-    ParityError = true;
+    // just alternate fields
+    //
     if (fieldParity == 1)
     {
-      blnPE1 = true;
+      fieldParity = 2;
     }
     else
     {
-      blnPE2 = true;
+      fieldParity = 1;
     }
   }
   else
   {
-    ParityError = false;
-  }
-
+    // Field parity detection
+    //    Field 1:
+    //      prev HSYNC (start of blanking) should be "close" to this VSYNC time
+    //        - must check for case where HSYNC happens just AFTER VSYNC (assume 64us period)
+    //
+    if (tk_VSYNC >= tk_HSYNC)
+    {
+      timeDiff = tk_VSYNC - tk_HSYNC;
+    }
+    else
+    {
+      timeDiff = 0 - (tk_HSYNC - tk_VSYNC);
+    }
+  
+    prevParity = fieldParity;
+    if ((timeDiff < 40) || (timeDiff > 100))    // < 20ms or > 50ms
+    {
+      fieldParity = 1;
+    }
+    else
+    {
+      fieldParity = 2;
+    }
+  
+    if (fieldParity == prevParity)
+    {
+      ParityError = true;
+      if (fieldParity == 1)
+      {
+        blnPE1 = true;
+      }
+      else
+      {
+        blnPE2 = true;
+      }
+    }
+    else
+    {
+      ParityError = false;
+    }
+  } // end of fieldSync
+  
   //**************
   //  determine field time delay from latest PPS
   //
@@ -379,11 +445,15 @@ VSYNC_ISR()
   //**********************
   //  update display
   //
-
-  if (!gpsStatus)
+  if (!EnableOverlay)
   {
-    BottomRow[1] = gpsStatus;    // flax GPS fail with 'X'
+    return;   // nope, leave now...
   }
+
+
+  // gps init status
+  //
+  BottomRow[1] = gpsInitStatus;    // 0 /space => OK
   
   // pps test...
   //
@@ -417,7 +487,7 @@ VSYNC_ISR()
   //
   ultodec(BottomRow + FIELDTOT_COL,fieldCount,-6);
 
-  // field time
+  // field times
   //
   if (fieldParity == 1)
   {
@@ -435,6 +505,18 @@ VSYNC_ISR()
       BottomRow[FIELD1TS_COL + i] = 0x00;
     }
   }
+
+  //************
+  // NMEA data
+  //
+  if (gpsRMC.valid)
+  {
+    OSD.atomax(BottomRow + 3,gpsRMC.hh,2);
+    BottomRow[5] = 0x44;
+    OSD.atomax(BottomRow + 6,gpsRMC.mm,2);
+    BottomRow[8] = 0x44;
+    OSD.atomax(BottomRow + 9,gpsRMC.ss,2);
+  }
   
   //***
   //  ENABLE interrupts again
@@ -443,10 +525,35 @@ VSYNC_ISR()
 
   // update display
   //
+
+#if 0
+  OSD.setCursor(0,TOP_ROW);
+  for(int i = 0; i < 30; i++)
+  {
+    OSD.write(TopRow[i]);
+  }
+
+  OSD.setCursor(0,BOTTOM_ROW);
+  for(int i = 0; i < 30; i++)
+  {
+    OSD.write(BottomRow[i]);
+  }
+
+  OSD.setCursor(0,5);
+  for(int i = 0; i < 30; i++)
+  {
+    OSD.write(TestRow[i]);
+  }
+#endif
+
+#if 1
   OSD.sendArray(TOP_ROW*30,TopRow,30);
   OSD.sendArray(BOTTOM_ROW*30,BottomRow,30);
 
- 
+//  OSD.atomax(TestRow,nmeaSentence,15);
+  OSD.sendArray(5*30,TestRow,30); // testing...
+#endif
+
 } // end of VSYNC_ISR
 
 //===============================
@@ -540,110 +647,7 @@ unsigned long GetTicks(CountSource src)
 
 } // end of GetTicks()
 
-//*****************************************************************************************
-// Utility routines
-//*****************************************************************************************
 
-//===========================================================================
-// ultohex - convert unsigned long to 8 hex MAX7456 characters in a character array
-//
-//===========================================================================
-void ultohex(char *dest, unsigned long ul)
-{
-
-  char hex[16] = {0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0B,0x0C,0x0D,0x0E,0x0F,0x10};
-
-  char *pn;
-  unsigned long nibble;
-
-  pn= dest + 7;
-  
-  for(int i = 0; i < 8; i++)
-  {
-
-    // get nibble 
-    //
-    nibble = (ul & 0xF);
-    *pn = hex[nibble];
-
-    // move to next nibble
-    //
-    ul = ul >> 4;
-    pn--;
-    
-  } // end of for loop through the nibbles
-  
-} // end of ultohex
-
-//===========================================================================
-// bytetohex - convert byte to 2 hex MAX7456 characters in a character array
-//
-//===========================================================================
-void bytetohex(char *dest, uint8_t byt)
-{
-
-  char hex[16] = {0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0B,0x0C,0x0D,0x0E,0x0F,0x10};
-
-  uint8_t nibble;
-
-  nibble = (byt & 0xF0) >> 4;
-  *dest = hex[nibble];
-
-  dest++;
-  nibble = (byt & 0x0F);
-  *dest = hex[nibble];
-    
-} // end of ultohex
-
-//===========================================================================
-// ultodec - convert unsigned long to decimal MAX7456 characters in a character array
-//    dest = ptr to destination of most significant char of decimal number
-//    ul = unsigned long value to convert
-//    len = # of chars to write in destination (pos => leading zeros, negative => leading spaces) 
-//===========================================================================
-void ultodec(char *dest, unsigned long ul, int len)
-{
-
-  char dec[10] = {0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09};
-
-  char *pn;
-
-  int pad;
-  unsigned long divisor;
-  unsigned short remainder;
-  
-  unsigned long nibble;
-
-  pad = abs(len);   // # of chars to write
-  
-  pn= dest + (pad - 1);
-
-  for(int i = 0; i < pad; i++)
-  {
-
-    // get least significan number/char
-    //
-    divisor = ul/10;
-    remainder = ul - (divisor * 10);
-    ul = divisor;
-    
-    // set char & move
-    //
-    if ((remainder == 0) && (ul == 0) && (len > 0))
-    {
-      // we have run out of digits, time to pad with spaces now
-      //
-      *pn = 0x00;
-    }
-    else
-    {
-      *pn = dec[remainder];
-    }
-    pn--;
-    
-  } // end of for loop through the nibbles
-  
-} // end of ultodec
 
 //**********************************************************************************************************
 // NEO 6 GPS routines
@@ -667,6 +671,8 @@ void ultodec(char *dest, unsigned long ul, int len)
 //        $GPGGA
 //        $GPDTM
 //        $PUBX,04
+//
+// return 0 on success
 //    
 //=================================================
 int gpsInit()
@@ -679,7 +685,6 @@ int gpsInit()
   uint8_t configTimepulse[] = {0x06, 0x07, 0x14, 0x00,        //   configure timepulse
                           0x40, 0x42, 0x0F, 0x00,             // time interval = 1,000,000 us
                           0xA0, 0x86, 0x01, 0x00,             // pulse length = 100,000 us = 100ms
-//                          0x10, 0x27, 0x00, 0x00,             // pulse length = 10ms
                           0x01,                               // positive pulse
                           0x00,                               // align to UTC
                           0x00,                               // time pulse only when sync'd to valid GPS
@@ -697,12 +702,31 @@ int gpsInit()
   //  TURN OFF everything to keep the serial port quiet
   //
   gpsSerial.println("$PUBX,40,RMC,0,0,0,0,0,0*46");   // RMC OFF
+  gpsSerial.flush(); // wait for it...
+
   gpsSerial.println("$PUBX,40,GGA,0,0,0,0,0,0*5A");   // GGA OFF
+  gpsSerial.flush(); // wait for it...
+
   gpsSerial.println("$PUBX,40,DTM,0,0,0,0,0,0*46");   // DTM OFF
+  gpsSerial.flush(); // wait for it...
+
   gpsSerial.println("$PUBX,40,VTG,0,0,0,0,0,0*5E");   // VTG OFF
+  gpsSerial.flush(); // wait for it...
+
   gpsSerial.println("$PUBX,40,GSA,0,0,0,0,0,0*4E");   // GSA OFF
+  gpsSerial.flush(); // wait for it...
+
   gpsSerial.println("$PUBX,40,GSV,0,0,0,0,0,0*59");   // GSV OFF
+  gpsSerial.flush(); // wait for it...
+
   gpsSerial.println("$PUBX,40,GLL,0,0,0,0,0,0*5C");   // GLL OFF
+  gpsSerial.flush(); // wait for it...
+
+  // wait 100ms and empty any pending incoming data
+  //
+  delay(100);
+  while (gpsSerial.available())
+    gpsSerial.read();
 
   //*********************************
   //  TURN ON sentences that we want
@@ -735,13 +759,13 @@ int gpsInit()
   {
     return gps_E_PUBX04;
   }
-
+#if 0
   ubxSend(configTimepulse,sizeof(configTimepulse)/sizeof(uint8_t));
   if (!ubxGetAck(configTimepulse))
   {
     return gps_E_CFGTP;
   }
-
+#endif
 
   return gps_OK;
   
@@ -786,14 +810,11 @@ void ubxSend(uint8_t *MSG, uint32_t len)
   //
   ubxPacket[len+2]=sum1;
   ubxPacket[len+3]=sum2;
-
-  // flush the output buffer - just in case
-  //
-  gpsSerial.flush();
-  
+ 
   // send the UBX command
   //
   gpsSerial.write(ubxPacket,len+4);
+  gpsSerial.flush();  // wait for it ...
   
 }   // end of sendUBX
 
@@ -840,9 +861,12 @@ bool ubxGetAck(uint8_t *MSG)
 
   //***********************************************
   // get the 10 byte ack packet (with timeout)
+  //  wait for first header byte of ACK (0xB5) - should arrive within timeout period..
   //    
   //
   startTime = millis();
+ 
+  
   for( int i = 0; i < 10;  )
   {
 
@@ -850,20 +874,45 @@ bool ubxGetAck(uint8_t *MSG)
     //
     //
     currentTime = millis();
-    waitTime = currentTime - startTime;
+    if (currentTime >= startTime)
+    {
+      waitTime = currentTime - startTime;
+    }
+    else
+    {
+      // rollover
+      waitTime = 0 - (startTime - currentTime);
+    }
     if (waitTime > 500)
     {
       return false;   // timeout
     }
 
-    // got a byte?, save it
+    // got a byte?
+    //   if starting header, save it and continue
     //
     if (gpsSerial.available()) 
     {
       b = gpsSerial.read();
       ackReceived[i] = b;
-      i++;                  // move to next byte in sequence
-    }
+      if (i != 0)
+      {
+        i++;    // next byte
+      }
+      else
+      {
+        // i == 0
+        // we are looking for the first byte of the header
+        //  move forward IFF the data bye matches the first header byte value
+        if (b == 0xB5)
+        {
+          // ok, we have the starting header byte and can move forward
+          //
+          i++;
+        }
+      } // end of i== 0 check
+
+    } // end of check for data available
     
   } // end of for loop to get the bytes
 
@@ -885,4 +934,381 @@ bool ubxGetAck(uint8_t *MSG)
     
 } // end of ubxAck
 
+//**********************************************************************************************************
+// NEO 6 GPS serial data parsing
+//**********************************************************************************************************
+
+//=============================================================
+//  ReadGPS - gather and parse any pending serial data from GPS
+//    returns false if error parsing data
+//=============================================================
+bool ReadGPS()
+{
+
+  char c;
+
+  //************
+  // Read/process all currently available characters
+  //  nmeaPos < 0 => not in a sentence now
+  //
+
+  while (gpsSerial.available() > 0)
+  {
+    // get the char
+    //
+    c = gpsSerial.read();
+
+    // Watch for beginning/ending of a sentence
+    //
+
+    if (c == '$')
+    {
+      // start of a sentence
+      //
+
+      // are we in the right place?
+      //
+      if (nmeaPos >= 0)
+      {
+        // oops! - currently in a sentence, should not be here
+        //
+        return false;
+      }
+
+      //  ok, save the start char and get ready for next one
+      //
+      nmeaSentence[0] = (uint8_t)c;
+      nmeaPos = 1;
+      
+    }
+    else
+    {
+      // we are somewhere IN a sentence
+      //
+
+      // are we in the right place?
+      //
+      if (nmeaPos < 0)
+      {
+        // oops! - not in a sentence now
+        //
+        return false;
+      }
+
+      // ok, save the end of the sentence and call the parser
+      //
+      nmeaSentence[nmeaPos] = (uint8_t)c;
+      nmeaPos++;                      // nmeaPos = # of chars in sentence
+      nmeaSentence[nmeaPos] = 0;      // null terminate the sentence
+
+      // if we just ended a sentence, call the parser
+      //
+      if (c == '\n')
+      {
+
+        // call the parser
+        //
+        if (!ParseNMEA((char *)nmeaSentence, nmeaPos))
+        {
+          nmeaPos = -1;   // restart
+          return false;   // exit on parsing error
+        }
+        
+        // looking for new sentence now...
+        //
+        nmeaPos = -1;
+       
+      }
+      
+    }  // end of check for start/non-start char
+    
+    
+  } // end of loop through available characters
+  
+  
+} // end of ReadGPS
+
+//=============================================================
+//  ParseNMEA - parse the current NMEA sentence
+//    currently supports the following sentences
+//        RMC, GGA, DTM, and PUBX,04
+//  INPUTS:
+//    nmeaChars[] - array of chars containing sentence
+//    iChars = # of chars in sentence (including terminating CRLF)
+//=============================================================
+#define MAX_FIELDS 17       // GGA has 17 fields (including the terminating CRLF)
+bool ParseNMEA(char *nmeaChars, int iChars)
+{
+  
+  int fieldStart[MAX_FIELDS];   // start position of each field
+                                // end of field = (start of next field - 2)
+  int fieldEnd;     // end position of a field
+  int iField;       // current field #
+  int fieldCount;   // # of fields in sentence (including CRLF)
+  int iPos;         // current position in nmea string
+
+  int ID_start;
+  int ID_len;
+  
+  //********
+  // find the start,end of each field
+  //
+  iField = 0;
+  fieldStart[iField] = 0;
+  iPos = 1;                 // next char to be tested
+
+  while (iPos < iChars)
+  {
+    // start of a new field?
+    //
+    if (nmeaChars[iPos] == ',')
+    {
+      //  end of this field inside the sentence
+      //
+      iField++;           // new field start
+      iPos++;             // start with position past ','
+      if (iPos >= iChars)
+      {
+        return false;     // no start of next field => unexpected end of sentence
+      }
+      fieldStart[iField] = iPos;
+
+    }
+    else if (nmeaChars[iPos] == '\r')
+    {
+      // CR => end of sentence and end of this field
+      //
+      iPos++;             // -> one past the CR = LF
+      iField++;           // last field = CRLF
+      fieldStart[iField] = iPos;
+      break;
+    }
+    else
+    {
+      // in a field, move to next char
+      //
+      iPos++;
+    }
+  } // loop through all chars in sentence
+
+  //  done scanning for fields
+  //   iPos should point to the terminating LF now
+  //   iField = field # of last field in sentence (CRLF)
+  //
+  if (nmeaChars[iPos] != '\n')
+  {
+    return false;       // terminated loop without finding CRLF
+  }
+  fieldCount = iField + 1;
+  if (fieldCount < 3)
+  {
+    return false;     // all sentences have at least three fields
+  }
+  
+  //************
+  // found the fields, now parse sentence data
+  //  
+  ID_start = fieldStart[0];                 // start of message ID field
+  ID_len = fieldStart[1] - ID_start - 1;    // length of message ID field
+
+  if (strncmp(nmeaChars + ID_start,"$GP",3) == 0)
+  {
+    // this is a standard NMEA sentence
+    //
+    char cmd[4];
+    cmd[3] = 0;     // null terminate it
+    strncpy(cmd,&nmeaChars[ID_start+3],3);    // get the cmd chars
+    if (strcmp(cmd,"RMC") == 0)
+    {      
+      return ParseRMC((uint8_t *)nmeaChars,fieldStart,fieldCount);
+    }
+    else if ( strcmp(cmd,"GGA") == 0 )
+    {
+      return true;
+    }
+    else if ( strcmp(cmd,"DTM") == 0 )
+    {
+      return true;
+    }
+    else
+    {
+        return true;
+    } // end of if/else block parsing standard NMEA sentences
+  }
+  else if (strncmp(&nmeaChars[ID_start],"$PUBX",5) == 0)
+  {
+    // this is a UBX proprietary sentence
+    //
+    int f1_start;
+    int f1_len;
+
+    f1_start = fieldStart[1];
+    f1_len = fieldStart[2] - f1_start - 1;
+    if (strncmp(&nmeaChars[f1_start],"04",2) == 0)
+    {
+      // PUBX,04 sentence
+      //
+      
+    } 
+    else
+    {
+      // unkown PUBX sentence => do nothing
+      //
+      return true;
+      
+    }// end of check for PUBX sentence type
+  }
+  else
+  {
+    // unknown sentence type
+    //
+    //  DO NOTHING and no error
+    return true;
+  }
+  
+} // end of ParseNMEA
+
+//=============================================================
+//  ParseRMC - parse & save the RMC data of interest
+//  INPUTS:
+//    nmeaChars[] - array of chars containing sentence
+//    fieldStart[] - array of starting indicies for fields
+//    fieldCount = # of fields (including CRLF)
+//=============================================================
+
+bool ParseRMC(uint8_t *nmeaChars, int *fieldStart, int fieldCount)
+{
+  int iStart;
+  int iLen;
+
+  gpsRMC.valid = false;
+  
+  // field 1 = time
+  //
+  iStart = fieldStart[1];
+  iLen = fieldStart[2] - iStart - 1;
+
+  if (iLen < 6)
+  {
+    return false; 
+  }
+  gpsRMC.hh[0] = nmeaChars[iStart++];
+  gpsRMC.hh[1] = nmeaChars[iStart++];
+  gpsRMC.mm[0] = nmeaChars[iStart++];
+  gpsRMC.mm[1] = nmeaChars[iStart++];  
+  gpsRMC.ss[0] = nmeaChars[iStart++];  
+  gpsRMC.ss[1] = nmeaChars[iStart++];  
+
+  // all done
+  //
+  gpsRMC.valid = true;
+  
+  return true;
+  
+} // end of parseRMC
+
+//*****************************************************************************************
+// Utility routines
+//*****************************************************************************************
+
+//===========================================================================
+// ultohex - convert unsigned long to 8 hex MAX7456 characters in a character array
+//
+//===========================================================================
+void ultohex(uint8_t *dest, unsigned long ul)
+{
+
+  uint8_t hex[16] = {0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0B,0x0C,0x0D,0x0E,0x0F,0x10};
+
+  uint8_t *pn;
+  unsigned long nibble;
+
+  pn= dest + 7;
+  
+  for(int i = 0; i < 8; i++)
+  {
+
+    // get nibble 
+    //
+    nibble = (ul & 0xF);
+    *pn = hex[nibble];
+
+    // move to next nibble
+    //
+    ul = ul >> 4;
+    pn--;
+    
+  } // end of for loop through the nibbles
+  
+} // end of ultohex
+
+//===========================================================================
+// bytetohex - convert byte to 2 hex MAX7456 characters in a character array
+//
+//===========================================================================
+void bytetohex(uint8_t *dest, uint8_t byt)
+{
+
+  uint8_t hex[16] = {0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0B,0x0C,0x0D,0x0E,0x0F,0x10};
+
+  uint8_t nibble;
+
+  nibble = (byt & 0xF0) >> 4;
+  *dest = hex[nibble];
+
+  dest++;
+  nibble = (byt & 0x0F);
+  *dest = hex[nibble];
+    
+} // end of bytetohex
+
+//===========================================================================
+// ultodec - convert unsigned long to decimal MAX7456 characters in a character array
+//    dest = ptr to destination of most significant char of decimal number
+//    ul = unsigned long value to convert
+//    len = # of chars to write in destination (pos => leading zeros, negative => leading spaces) 
+//===========================================================================
+void ultodec(uint8_t *dest, unsigned long ul, int len)
+{
+
+  uint8_t dec[10] = {0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09};
+
+  uint8_t *pn;
+
+  int pad;
+  unsigned long divisor;
+  unsigned short remainder;
+  
+  unsigned long nibble;
+
+  pad = abs(len);   // # of chars to write
+  
+  pn= dest + (pad - 1);
+
+  for(int i = 0; i < pad; i++)
+  {
+
+    // get least significan number/char
+    //
+    divisor = ul/10;
+    remainder = ul - (divisor * 10);
+    ul = divisor;
+    
+    // set char & move
+    //
+    if ((remainder == 0) && (ul == 0) && (len > 0))
+    {
+      // we have run out of digits, time to pad with spaces now
+      //
+      *pn = 0x00;
+    }
+    else
+    {
+      *pn = dec[remainder];
+    }
+    pn--;
+    
+  } // end of for loop through the nibbles
+  
+} // end of ultodec
 
