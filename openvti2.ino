@@ -145,24 +145,8 @@ volatile unsigned long tk_VSYNC;      // vsync "time" = 2mhz ticks
 volatile unsigned long tk_HSYNC;      // hsync "time" = 2mhz ticks
 
 #if 1
-bool inV = false;     // in vsync
-unsigned long inVcount = 0;
 volatile unsigned long saMin=0xFFFFFFFF;
 volatile unsigned long saMax=0x00;
-unsigned long minFree = 0xFFFF;
-#endif
-#if 1
-bool capFlag = false;     // true when issue captured
-uint8_t if_PCIFR;
-uint8_t if_EIFR;
-uint8_t if_TIFR0;
-uint8_t if_TIFR1;
-uint8_t if_TIFR2;
-uint8_t if_SPSR;      // SPI status register (bit 7 is IF)
-uint8_t if_UCSR0A;    // UART control & status register (bits 5,6,7 are interrupt flags)
-uint8_t if_WDTCSR;    // watchdog timer (bit 7 is flag)
-uint8_t if_ACSR;      // analog compare - bit 4 is flag
-uint8_t if_ADCSRA;    // bit 4 - ADC flag
 #endif
 
 //***********************
@@ -253,7 +237,6 @@ void setup() {
   //************
   //  General init
   //
-  ADCSRA = 0x00;              // just in case?
   
   EnableOverlay = false;      // turn off overlay update for now...
   fieldCount = 0;
@@ -262,11 +245,6 @@ void setup() {
     TopRow[i] = 0x00;
     BottomRow[i] = 0x00;
   }
-
-#if 1
-  pinMode(LED_BUILTIN,OUTPUT);
-  digitalWrite(LED_BUILTIN, LOW);   // OFF
-#endif 
 
   //************
   // Init GPS
@@ -362,12 +340,6 @@ void setup() {
   //
   delay(50);
 
-#if 1
-  inV = false;
-  inVcount = 0;
-  BottomRow[1] = 0x00;
-#endif
-
 #if 0  
 //  fieldSync = false;
 //  TIMSK1 &= !(1 << ICIE1);        // turn off ICP ints
@@ -391,10 +363,8 @@ void loop() {
   {
     // get & parse serial data from GPS
     //
-#if 1
-    ReadGPS();
-#endif
 
+    ReadGPS();
   }
 
 } // end of loop()
@@ -414,30 +384,25 @@ VSYNC_ISR()
   unsigned long timePrev;
   uint8_t utmp;
 
-#if 1
-  if (inV)
-  {
-    // already in vsync?
-    inVcount++;
-    ultohex(TestRow + 1, inVcount);
-  }
-  inV = true;
-#endif
-
-  // get time
+  //**************
+  // Get the time of this VSYNC
   //
   timePrev = tk_VSYNC;
   tk_VSYNC = GetTicks(TCNT);
-  
+
+  //************************
   // increment field count
   //
   fieldCount++;
 
+  //*******************************************************
   // determine field parity : field 1 or field 2 of a frame
+  //   * during startup, check HSYNC timing vs VSYNC to identify field 1
+  //   * after startup, turn off HSYNC ints and alternate fields
   //
   if (!fieldSync)
   {
-    // just alternate fields
+    // after Startup/sync, just alternate fields
     //
     if (fieldParity == 1)
     {
@@ -450,7 +415,7 @@ VSYNC_ISR()
   }
   else
   {
-    // Field parity detection
+    // Startup/sync: Field parity detection
     //    Field 1:
     //      prev HSYNC (start of blanking) should be "close" to this VSYNC time
     //        - must check for case where HSYNC happens just AFTER VSYNC (assume 64us period)
@@ -493,15 +458,15 @@ VSYNC_ISR()
   } // end of fieldSync
   
   
-#if 1
-  //***
+  //****************************
   //  ENABLE interrupts again
   //
   interrupts();
-#endif
 
-  //**************
-  //  determine field time delay from latest PPS
+
+  //*************************************************
+  //  VSYNC UTC time
+  //    - determine field time delay from latest PPS
   //
   if (tk_VSYNC >= tk_PPS)
   {
@@ -517,22 +482,23 @@ VSYNC_ISR()
   timeDiff /= (Timer_Milli / 10);
 
   //**********************
-  //  update display
+  //  update display info
   //
-
 
   if (!EnableOverlay)
   {
-    inV = false;
     return;   // nope, leave now...
   }
 
-
-  // gps init status
+  //
+  // OSD Bottom Row:
+  //    - gps init status
   //
   BottomRow[1] = gpsInitStatus;    // 0 /space => OK
-  
-  // pps test...
+
+  //
+  // OSD Bottom Row
+  //    - pps "mark" on first field after PPS
   //
   if (pps_now)
   {
@@ -544,28 +510,20 @@ VSYNC_ISR()
     BottomRow[0] = 0x00;
   }
 
-  // field parity
+  // OSD Bottom Row
+  //    - field count & field time
   //
-  if (fieldParity == 1)
-  {
-    TopRow[3] = 0x01;
-    TopRow[4] = 0x00;
-  }
-  else
-  {
-    TopRow[3] = 0x00;
-    TopRow[4] = 0x02;
-  }
- 
 
   // field count
   //
   ultodec(BottomRow + FIELDTOT_COL,fieldCount,0);     // no padding, left justified
 
-  // field times
+  // field time
   //
   if (fieldParity == 1)
   {
+    // field 1
+    //
     ultodec(BottomRow + FIELD1TS_COL, timeDiff, 4);  // write field 1 stamp, 4 chars, zero padded
     for (int i = 0; i < 4; i++)  // clear field 2 stamp
     {
@@ -574,6 +532,8 @@ VSYNC_ISR()
   }
   else
   {
+    // field 2
+    //
     ultodec(BottomRow + FIELD2TS_COL, timeDiff, 4);  // write field 2 stamp, 4 chars, zero padded
     for (int i = 0; i < 4; i++)  // clear field 1 stamp
     {
@@ -581,8 +541,8 @@ VSYNC_ISR()
     }
   }
 
-  //************
-  // NMEA data
+  // OSD Bottom Row
+  //  - HH:MM:SS time
   //
 
   if (gpsRMC.valid)
@@ -594,84 +554,12 @@ VSYNC_ISR()
     OSD.atomax(BottomRow + 9,gpsRMC.ss,2);
   }
 
-
-#if 0
-  check_mem();
-  if (stackptr <= heapptr)
-  {
-    // overflow!
-    TestRow[1] = 0x17;    // 'M'
-  }
-  else
-  {
-    timeDiff = stackptr-heapptr;
-    if (timeDiff < minFree)
-    {
-      minFree = timeDiff;
-      ultohex(TestRow + 20,timeDiff);
-    }
-  }
-#endif
-
-#if 0
-  // check int setup
-  //
-  bytetohex(TopRow+8, EIMSK);
-  bytetohex(TopRow+11, PCMSK0);
-  bytetohex(TopRow+14, PCMSK1);
-  bytetohex(TopRow+17, PCMSK2);
-  bytetohex(TopRow+20, TIMSK0);
-  bytetohex(TopRow+23, TIMSK1);
-  bytetohex(TopRow+26, TIMSK2);
-#endif
-
-
-  // update display
+  //**************************
+  // Update OSD
+  //  - send updated info to Max7456
   //
 
-#if 0
-  OSD.setCursor(0,TOP_ROW);
-  for(int i = 0; i < 30; i++)
-  {
-    OSD.write(TopRow[i]);
-  }
 
-  OSD.setCursor(0,BOTTOM_ROW);
-  for(int i = 0; i < 30; i++)
-  {
-    OSD.write(BottomRow[i]);
-  }
-
-  OSD.setCursor(0,5);
-  for(int i = 0; i < 30; i++)
-  {
-    OSD.write(TestRow[i]);
-  }
-#endif
-
-#if 0
-  // writeArray version
-  timePrev = GetTicks(TCNT);
-  OSD.setCursor(0,TOP_ROW);
-  OSD.writeArray(TopRow,30);
-  timeDiff = GetTicks(TCNT);
-  if (timeDiff > timePrev)
-  {
-    timeDiff -= timePrev;
-  }
-  else
-  {
-    timeDiff = 0 - (timePrev - timeDiff);
-  }
-
-  OSD.setCursor(0,BOTTOM_ROW);
-  OSD.writeArray(BottomRow,30);
-
-  OSD.setCursor(0,5);
-  OSD.writeArray(TestRow,30);
-#endif
-
-#if 1
   timePrev = GetTicks(TCNT);
   OSD.sendArray(TOP_ROW*30,TopRow,30);
   timeDiff = GetTicks(TCNT);
@@ -686,40 +574,10 @@ VSYNC_ISR()
   
   OSD.sendArray(BOTTOM_ROW*30,BottomRow,30);
 
+#if 1
   OSD.sendArray(5*30,TestRow,30); // testing...
 #endif
 
-#if 0
-  // delay in sendArray
-  //
-  if (timeDiff > saMax)
-  {
-    saMax = timeDiff;
-  }
-  if (timeDiff < saMin)
-  {
-    saMin = timeDiff;
-  }
-  
-#endif
-
-#if 0
-
-  // save current int flags
-  //
-  if_PCIFR = PCIFR;
-  if_EIFR = EIFR;
-  if_TIFR0 = TIFR0;
-  if_TIFR1 = TIFR1;
-  if_TIFR2 = TIFR2;
-  if_SPSR = SPSR;
-  if_UCSR0A = UCSR0A;
-  if_WDTCSR = WDTCSR;
-  if_ACSR = ACSR;
-  if_ADCSRA = ADCSRA;
-
-  interrupts();   // restore ints now
-#endif
 
 #if 1
   // get vsync ISR delay to here
@@ -745,61 +603,12 @@ VSYNC_ISR()
   {
     saMin = timeDiff;
   }
+  ultodec(TopRow+10,saMin,0);
+  ultodec(TopRow+20,saMax,0);
+
 #endif
 
-#if 1
-  // display saMin, saMax
-  if (!capFlag)
-  {
-    ultodec(TopRow+10,saMin,0);
-    ultodec(TopRow+20,saMax,0);
 
-
-    bytetohex(TopRow+6,ADCSRA);
-    
-    if (SREG & 0x80)
-    {
-      TopRow[5] = 0x13;   // 'I'
-    }
-    
-    if ((saMax > 2500))
-    {
-      capFlag = true;     // only do this once
-      
-  #if 0      
-      for (int i = 0; i < 30; i++)
-      {
-        TopRow[i] = 0x00;
-      }
-      
-      bytetohex(TopRow+8, EIMSK);
-      bytetohex(TopRow+11, PCMSK0);
-      bytetohex(TopRow+14, PCMSK1);
-      bytetohex(TopRow+17, PCMSK2);
-      bytetohex(TopRow+20, TIMSK0);
-      bytetohex(TopRow+23, TIMSK1);
-      bytetohex(TopRow+26, TIMSK2);
-    
-      bytetohex(TestRow,if_PCIFR);
-      bytetohex(TestRow+3,if_EIFR);
-      bytetohex(TestRow+6,if_TIFR0);
-      bytetohex(TestRow+9,if_TIFR1);
-      bytetohex(TestRow+12,if_TIFR2);
-      bytetohex(TestRow+15,if_SPSR);
-      bytetohex(TestRow+18,if_UCSR0A);
-      bytetohex(TestRow+21,if_WDTCSR);
-      bytetohex(TestRow+24,if_ACSR);
-      bytetohex(TestRow+27,if_ADCSRA);
-  #endif
-    }
-  }
-  
-#endif
-
-#if 1
-  noInterrupts();
-  inV = false;
-#endif
 } // end of VSYNC_ISR
 
 //===============================
@@ -845,25 +654,7 @@ PPS_ISR()
 
   //
   pps_now = true;
-  
-#if 0
-  check_mem();
-  if (stackptr <= heapptr)
-  {
-    // overflow!
-    TestRow[1] = 0x17;    // 'M'
-  }
-  else
-  {
-    timeDiff = stackptr-heapptr;
-    if (timeDiff < minFree)
-    {
-      minFree = timeDiff;
-      ultohex(TestRow + 20,timeDiff);
-    }
-  }
-#endif
-  
+    
 } // end of PPS_ISR
 
 //========================================
@@ -1021,13 +812,12 @@ int gpsInit()
   {
     return gps_E_PUBX04;
   }
-#if 0
+
   ubxSend(configTimepulse,sizeof(configTimepulse)/sizeof(uint8_t));
   if (!ubxGetAck(configTimepulse))
   {
     return gps_E_CFGTP;
   }
-#endif
 
   return gps_OK;
   
@@ -1266,9 +1056,6 @@ bool ReadGPS()
       //
       if (nmeaCount >= NMEA_MAX)
       {
-#if 1
-        TestRow[2] = 0x18;    // 'N'
-#endif
         nmeaCount = 0;      // drop all of it 
         continue;
       }
@@ -1545,54 +1332,10 @@ void bytetohex(uint8_t *dest, uint8_t byt)
 // ultodec - convert unsigned long to decimal MAX7456 characters in a character array
 //    dest = ptr to destination of most significant char of decimal number
 //    ul = unsigned long value to convert
-//    len = # of chars to write in destination (pos => leading zeros, negative => leading spaces) 
-//===========================================================================
-#if 0
-void ultodec(uint8_t *dest, unsigned long ul, int len)
-{
-
-  uint8_t *pn;
-
-  int pad;
-  unsigned long divisor;
-  unsigned short remainder;
-  
-  unsigned long nibble;
-
-  pad = abs(len);   // # of chars to write
-  
-  pn= dest + (pad - 1);
-
-  for(int i = 0; i < pad; i++)
-  {
-
-    // get least significan number/char
-    //
-    divisor = ul/10;
-    remainder = ul - (divisor * 10);
-    ul = divisor;
-    
-    // set char & move
-    //
-    if ((remainder == 0) && (ul == 0) && (len > 0))
-    {
-      // we have run out of digits, time to pad with spaces now
-      //
-      *pn = 0x00;
-    }
-    else
-    {
-      *pn = hex[remainder];
-    }
-    pn--;
-    
-  } // end of for loop through the nibbles
-  
-} // end of ultodec
-#endif
-
-//===========================================================================
-//   max of 10 chars , left aligned, no padding
+//    total = field length, 0 => left aligned with no padding (10 char max)
+//                        , > 0 => pad with zeros on left to field length 
+//
+//    ** note: if total > 0 and ul doesn't fit, then writes only least significant digits
 //===========================================================================
 unsigned long powers[10] = {
   1000000000,
