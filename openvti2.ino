@@ -145,9 +145,24 @@ volatile unsigned long tk_VSYNC;      // vsync "time" = 2mhz ticks
 volatile unsigned long tk_HSYNC;      // hsync "time" = 2mhz ticks
 
 #if 1
-volatile bool InVsync = false;
+bool inV = false;     // in vsync
+unsigned long inVcount = 0;
 volatile unsigned long saMin=0xFFFFFFFF;
 volatile unsigned long saMax=0x00;
+unsigned long minFree = 0xFFFF;
+#endif
+#if 1
+bool capFlag = false;     // true when issue captured
+uint8_t if_PCIFR;
+uint8_t if_EIFR;
+uint8_t if_TIFR0;
+uint8_t if_TIFR1;
+uint8_t if_TIFR2;
+uint8_t if_SPSR;      // SPI status register (bit 7 is IF)
+uint8_t if_UCSR0A;    // UART control & status register (bits 5,6,7 are interrupt flags)
+uint8_t if_WDTCSR;    // watchdog timer (bit 7 is flag)
+uint8_t if_ACSR;      // analog compare - bit 4 is flag
+uint8_t if_ADCSRA;    // bit 4 - ADC flag
 #endif
 
 //***********************
@@ -183,7 +198,11 @@ volatile int pps_countdown;           // # of pps interrupts until pps valid - u
 #define NMEA_MAX  201    // max length of a nmea sentence
 
 uint8_t nmeaSentence[NMEA_MAX];       // current NMEA sentence
-int nmeaPos = -1;                     // position of next char in NMEA sentence, -1 => no current sentence
+int nmeaCount = -1;                   // position of next char in NMEA sentence = # of chars in current sentence, 0 => no current sentence
+  
+#define MAX_FIELDS 17       // GGA has 17 fields (including the terminating CRLF)
+int fieldStart[MAX_FIELDS];   // start position of each field
+                              // end of field = (start of next field - 2)
 
 typedef struct {
   bool valid;
@@ -192,6 +211,24 @@ typedef struct {
   uint8_t ss[2];
 } nmea_rmc;
 nmea_rmc gpsRMC;
+
+/* This function places the current value of the heap and stack pointers in the
+ * variables. You can call it from any place in your code and save the data for
+ * outputting or displaying later. This allows you to check at different parts of
+ * your program flow.
+ * The stack pointer starts at the top of RAM and grows downwards. The heap pointer
+ * starts just above the static variables etc. and grows upwards. SP should always
+ * be larger than HP or you'll be in big trouble! The smaller the gap, the more
+ * careful you need to be. Julian Gall 6-Feb-2009.
+ */
+uint8_t * heapptr, * stackptr;
+void check_mem() {
+  stackptr = (uint8_t *)malloc(4);          // use stackptr temporarily
+  heapptr = stackptr;                     // save value of heap pointer
+  free(stackptr);      // free up the memory again (sets stackptr to 0)
+  stackptr =  (uint8_t *)(SP);           // save value of stack pointer
+}
+
 
 //========================================
 //  SETUP ROUTINE
@@ -216,6 +253,8 @@ void setup() {
   //************
   //  General init
   //
+  ADCSRA = 0x00;              // just in case?
+  
   EnableOverlay = false;      // turn off overlay update for now...
   fieldCount = 0;
   for (int i = 0; i< 30; i++) 
@@ -223,6 +262,11 @@ void setup() {
     TopRow[i] = 0x00;
     BottomRow[i] = 0x00;
   }
+
+#if 1
+  pinMode(LED_BUILTIN,OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);   // OFF
+#endif 
 
   //************
   // Init GPS
@@ -317,6 +361,13 @@ void setup() {
   // now turn off hsync ICP interrupt
   //
   delay(50);
+
+#if 1
+  inV = false;
+  inVcount = 0;
+  BottomRow[1] = 0x00;
+#endif
+
 #if 0  
 //  fieldSync = false;
 //  TIMSK1 &= !(1 << ICIE1);        // turn off ICP ints
@@ -328,7 +379,6 @@ void setup() {
   OSD.home();
   OSD.setCharEncoding(MAX7456_ASCII);
   EnableOverlay = true;   // start the overlay...
-
  
 } // end of setup
 
@@ -364,6 +414,15 @@ VSYNC_ISR()
   unsigned long timePrev;
   uint8_t utmp;
 
+#if 1
+  if (inV)
+  {
+    // already in vsync?
+    inVcount++;
+    ultohex(TestRow + 1, inVcount);
+  }
+  inV = true;
+#endif
 
   // get time
   //
@@ -433,6 +492,14 @@ VSYNC_ISR()
     }
   } // end of fieldSync
   
+  
+#if 1
+  //***
+  //  ENABLE interrupts again
+  //
+  interrupts();
+#endif
+
   //**************
   //  determine field time delay from latest PPS
   //
@@ -453,18 +520,10 @@ VSYNC_ISR()
   //  update display
   //
 
-#if 1
-  if (InVsync)
-  {
-    // oops! - leave now
-    TestRow[2] = 0x20;
-
-    return;
-  }
-#endif  
 
   if (!EnableOverlay)
   {
+    inV = false;
     return;   // nope, leave now...
   }
 
@@ -497,19 +556,17 @@ VSYNC_ISR()
     TopRow[3] = 0x00;
     TopRow[4] = 0x02;
   }
+ 
 
-  TopRow[5] = (blnPE1? 0x22 : 0x00);
-  TopRow[6] = (blnPE2? 0x23 : 0x00);
-  
   // field count
   //
-  ultodec(BottomRow + FIELDTOT_COL,fieldCount,-6);
+  ultodec(BottomRow + FIELDTOT_COL,fieldCount,0);     // no padding, left justified
 
   // field times
   //
   if (fieldParity == 1)
   {
-    ultodec(BottomRow + FIELD1TS_COL, timeDiff, -4);  // write field 1 stamp
+    ultodec(BottomRow + FIELD1TS_COL, timeDiff, 4);  // write field 1 stamp, 4 chars, zero padded
     for (int i = 0; i < 4; i++)  // clear field 2 stamp
     {
       BottomRow[FIELD2TS_COL + i] = 0x00;
@@ -517,7 +574,7 @@ VSYNC_ISR()
   }
   else
   {
-    ultodec(BottomRow + FIELD2TS_COL, timeDiff, -4);  // write field 2 stamp
+    ultodec(BottomRow + FIELD2TS_COL, timeDiff, 4);  // write field 2 stamp, 4 chars, zero padded
     for (int i = 0; i < 4; i++)  // clear field 1 stamp
     {
       BottomRow[FIELD1TS_COL + i] = 0x00;
@@ -527,6 +584,7 @@ VSYNC_ISR()
   //************
   // NMEA data
   //
+
   if (gpsRMC.valid)
   {
     OSD.atomax(BottomRow + 3,gpsRMC.hh,2);
@@ -535,11 +593,38 @@ VSYNC_ISR()
     BottomRow[8] = 0x44;
     OSD.atomax(BottomRow + 9,gpsRMC.ss,2);
   }
-  
-  //***
-  //  ENABLE interrupts again
+
+
+#if 0
+  check_mem();
+  if (stackptr <= heapptr)
+  {
+    // overflow!
+    TestRow[1] = 0x17;    // 'M'
+  }
+  else
+  {
+    timeDiff = stackptr-heapptr;
+    if (timeDiff < minFree)
+    {
+      minFree = timeDiff;
+      ultohex(TestRow + 20,timeDiff);
+    }
+  }
+#endif
+
+#if 0
+  // check int setup
   //
-  interrupts();
+  bytetohex(TopRow+8, EIMSK);
+  bytetohex(TopRow+11, PCMSK0);
+  bytetohex(TopRow+14, PCMSK1);
+  bytetohex(TopRow+17, PCMSK2);
+  bytetohex(TopRow+20, TIMSK0);
+  bytetohex(TopRow+23, TIMSK1);
+  bytetohex(TopRow+26, TIMSK2);
+#endif
+
 
   // update display
   //
@@ -564,12 +649,20 @@ VSYNC_ISR()
   }
 #endif
 
-#if 1
+#if 0
   // writeArray version
   timePrev = GetTicks(TCNT);
   OSD.setCursor(0,TOP_ROW);
   OSD.writeArray(TopRow,30);
-  timeDiff = GetTicks(TCNT) - timePrev;
+  timeDiff = GetTicks(TCNT);
+  if (timeDiff > timePrev)
+  {
+    timeDiff -= timePrev;
+  }
+  else
+  {
+    timeDiff = 0 - (timePrev - timeDiff);
+  }
 
   OSD.setCursor(0,BOTTOM_ROW);
   OSD.writeArray(BottomRow,30);
@@ -578,18 +671,27 @@ VSYNC_ISR()
   OSD.writeArray(TestRow,30);
 #endif
 
-#if 0
+#if 1
   timePrev = GetTicks(TCNT);
   OSD.sendArray(TOP_ROW*30,TopRow,30);
-  timeDiff = GetTicks(TCNT) - timePrev;
+  timeDiff = GetTicks(TCNT);
+  if (timeDiff > timePrev)
+  {
+    timeDiff -= timePrev;
+  }
+  else
+  {
+    timeDiff = 0 - (timePrev - timeDiff);
+  }
   
   OSD.sendArray(BOTTOM_ROW*30,BottomRow,30);
 
-//  OSD.atomax(TestRow,nmeaSentence,15);
   OSD.sendArray(5*30,TestRow,30); // testing...
 #endif
 
-#if 1
+#if 0
+  // delay in sendArray
+  //
   if (timeDiff > saMax)
   {
     saMax = timeDiff;
@@ -598,15 +700,106 @@ VSYNC_ISR()
   {
     saMin = timeDiff;
   }
-  ultodec(TestRow+5,saMin,5);
-  ultodec(TestRow+12,saMax,5);
+  
+#endif
+
+#if 0
+
+  // save current int flags
+  //
+  if_PCIFR = PCIFR;
+  if_EIFR = EIFR;
+  if_TIFR0 = TIFR0;
+  if_TIFR1 = TIFR1;
+  if_TIFR2 = TIFR2;
+  if_SPSR = SPSR;
+  if_UCSR0A = UCSR0A;
+  if_WDTCSR = WDTCSR;
+  if_ACSR = ACSR;
+  if_ADCSRA = ADCSRA;
+
+  interrupts();   // restore ints now
+#endif
+
+#if 1
+  // get vsync ISR delay to here
+  //
+  utmp = SREG;
+  noInterrupts();   // protect the count
+  timeDiff = GetTicks(TCNT);
+  SREG = utmp;
+  
+  if (timeDiff > tk_VSYNC)
+  {
+    timeDiff -= tk_VSYNC;
+  }
+  else
+  {
+    timeDiff = 0 - (tk_VSYNC - timeDiff);
+  }
+  if (timeDiff > saMax)
+  {
+    saMax = timeDiff;
+  }
+  if (timeDiff < saMin)
+  {
+    saMin = timeDiff;
+  }
+#endif
+
+#if 1
+  // display saMin, saMax
+  if (!capFlag)
+  {
+    ultodec(TopRow+10,saMin,0);
+    ultodec(TopRow+20,saMax,0);
+
+
+    bytetohex(TopRow+6,ADCSRA);
+    
+    if (SREG & 0x80)
+    {
+      TopRow[5] = 0x13;   // 'I'
+    }
+    
+    if ((saMax > 2500))
+    {
+      capFlag = true;     // only do this once
+      
+  #if 0      
+      for (int i = 0; i < 30; i++)
+      {
+        TopRow[i] = 0x00;
+      }
+      
+      bytetohex(TopRow+8, EIMSK);
+      bytetohex(TopRow+11, PCMSK0);
+      bytetohex(TopRow+14, PCMSK1);
+      bytetohex(TopRow+17, PCMSK2);
+      bytetohex(TopRow+20, TIMSK0);
+      bytetohex(TopRow+23, TIMSK1);
+      bytetohex(TopRow+26, TIMSK2);
+    
+      bytetohex(TestRow,if_PCIFR);
+      bytetohex(TestRow+3,if_EIFR);
+      bytetohex(TestRow+6,if_TIFR0);
+      bytetohex(TestRow+9,if_TIFR1);
+      bytetohex(TestRow+12,if_TIFR2);
+      bytetohex(TestRow+15,if_SPSR);
+      bytetohex(TestRow+18,if_UCSR0A);
+      bytetohex(TestRow+21,if_WDTCSR);
+      bytetohex(TestRow+24,if_ACSR);
+      bytetohex(TestRow+27,if_ADCSRA);
+  #endif
+    }
+  }
   
 #endif
 
 #if 1
-  InVsync = false;
+  noInterrupts();
+  inV = false;
 #endif
-
 } // end of VSYNC_ISR
 
 //===============================
@@ -652,6 +845,24 @@ PPS_ISR()
 
   //
   pps_now = true;
+  
+#if 0
+  check_mem();
+  if (stackptr <= heapptr)
+  {
+    // overflow!
+    TestRow[1] = 0x17;    // 'M'
+  }
+  else
+  {
+    timeDiff = stackptr-heapptr;
+    if (timeDiff < minFree)
+    {
+      minFree = timeDiff;
+      ultohex(TestRow + 20,timeDiff);
+    }
+  }
+#endif
   
 } // end of PPS_ISR
 
@@ -699,8 +910,6 @@ unsigned long GetTicks(CountSource src)
   return( tickCount );
 
 } // end of GetTicks()
-
-
 
 //**********************************************************************************************************
 // NEO 6 GPS routines
@@ -1002,7 +1211,7 @@ bool ReadGPS()
 
   //************
   // Read/process all currently available characters
-  //  nmeaPos < 0 => not in a sentence now
+  //  nmeaCount == 0 => not in a sentence now
   //
 
   while (gpsSerial.available() > 0)
@@ -1021,7 +1230,7 @@ bool ReadGPS()
 
       // are we in the right place?
       //
-      if (nmeaPos >= 0)
+      if (nmeaCount > 0)
       {
         // oops! - currently in a sentence, should not be here
         //
@@ -1031,7 +1240,7 @@ bool ReadGPS()
       //  ok, save the start char and get ready for next one
       //
       nmeaSentence[0] = (uint8_t)c;
-      nmeaPos = 1;
+      nmeaCount = 1;
       
     }
     else
@@ -1041,7 +1250,7 @@ bool ReadGPS()
 
       // are we in the right place?
       //
-      if (nmeaPos < 0)
+      if (nmeaCount <= 0)
       {
         // oops! - not in a sentence now
         //
@@ -1050,31 +1259,41 @@ bool ReadGPS()
 
       // ok, save the end of the sentence and call the parser
       //
-      nmeaSentence[nmeaPos] = (uint8_t)c;
-      nmeaPos++;                      // nmeaPos = # of chars in sentence
-      nmeaSentence[nmeaPos] = 0;      // null terminate the sentence
+      nmeaSentence[nmeaCount] = (uint8_t)c;
+      nmeaCount++;                      
+
+      // too many?
+      //
+      if (nmeaCount >= NMEA_MAX)
+      {
+#if 1
+        TestRow[2] = 0x18;    // 'N'
+#endif
+        nmeaCount = 0;      // drop all of it 
+        continue;
+      }
 
       // if we just ended a sentence, call the parser
       //
       if (c == '\n')
       {
+        nmeaSentence[nmeaCount] = 0;      // null terminate the sentence
 
         // call the parser
         //
-        if (!ParseNMEA((char *)nmeaSentence, nmeaPos))
+        if (!ParseNMEA())
         {
-          nmeaPos = -1;   // restart
+          nmeaCount = 0;   // restart
           return false;   // exit on parsing error
         }
         
         // looking for new sentence now...
         //
-        nmeaPos = -1;
+        nmeaCount = 0;
        
       }
       
     }  // end of check for start/non-start char
-    
     
   } // end of loop through available characters
   
@@ -1089,19 +1308,14 @@ bool ReadGPS()
 //    nmeaChars[] - array of chars containing sentence
 //    iChars = # of chars in sentence (including terminating CRLF)
 //=============================================================
-#define MAX_FIELDS 17       // GGA has 17 fields (including the terminating CRLF)
-bool ParseNMEA(char *nmeaChars, int iChars)
+bool ParseNMEA()
 {
-  
-  int fieldStart[MAX_FIELDS];   // start position of each field
-                                // end of field = (start of next field - 2)
-  int fieldEnd;     // end position of a field
   int iField;       // current field #
   int fieldCount;   // # of fields in sentence (including CRLF)
   int iPos;         // current position in nmea string
 
-  int ID_start;
-  int ID_len;
+  int fStart;
+  int fLen;
   
   //********
   // find the start,end of each field
@@ -1110,24 +1324,24 @@ bool ParseNMEA(char *nmeaChars, int iChars)
   fieldStart[iField] = 0;
   iPos = 1;                 // next char to be tested
 
-  while (iPos < iChars)
+  while (iPos < nmeaCount)
   {
     // start of a new field?
     //
-    if (nmeaChars[iPos] == ',')
+    if ((char)nmeaSentence[iPos] == ',')
     {
       //  end of this field inside the sentence
       //
       iField++;           // new field start
       iPos++;             // start with position past ','
-      if (iPos >= iChars)
+      if (iPos >= nmeaCount)
       {
         return false;     // no start of next field => unexpected end of sentence
       }
       fieldStart[iField] = iPos;
 
     }
-    else if (nmeaChars[iPos] == '\r')
+    else if ((char)nmeaSentence[iPos] == '\r')
     {
       // CR => end of sentence and end of this field
       //
@@ -1148,7 +1362,7 @@ bool ParseNMEA(char *nmeaChars, int iChars)
   //   iPos should point to the terminating LF now
   //   iField = field # of last field in sentence (CRLF)
   //
-  if (nmeaChars[iPos] != '\n')
+  if ((char)nmeaSentence[iPos] != '\n')
   {
     return false;       // terminated loop without finding CRLF
   }
@@ -1161,25 +1375,36 @@ bool ParseNMEA(char *nmeaChars, int iChars)
   //************
   // found the fields, now parse sentence data
   //  
-  ID_start = fieldStart[0];                 // start of message ID field
-  ID_len = fieldStart[1] - ID_start - 1;    // length of message ID field
+  fStart = fieldStart[0];                 // start of message ID field
+  fLen = fieldStart[1] - fStart - 1;    // length of message ID field
 
-  if (strncmp(nmeaChars + ID_start,"$GP",3) == 0)
+  if ( ((char)nmeaSentence[fStart] == '$') &&
+        ((char)nmeaSentence[fStart+1] == 'G') &&
+        ((char)nmeaSentence[fStart+2] == 'P') )
   {
-    // this is a standard NMEA sentence
+    // this is a standard NMEA sentence starting with $GP
     //
-    char cmd[4];
-    cmd[3] = 0;     // null terminate it
-    strncpy(cmd,&nmeaChars[ID_start+3],3);    // get the cmd chars
-    if (strcmp(cmd,"RMC") == 0)
-    {      
-      return ParseRMC((uint8_t *)nmeaChars,fieldStart,fieldCount);
+    if (fLen < 6)
+    {
+      // unknown message - just return no error for now
+      return true;
     }
-    else if ( strcmp(cmd,"GGA") == 0 )
+    
+    if ( ((char)nmeaSentence[fStart+3] == 'R') &&
+          ((char)nmeaSentence[fStart+4] == 'M') &&
+          ((char)nmeaSentence[fStart+5] == 'C') )
+    {
+      return ParseRMC();
+    }
+    else if ( ((char)nmeaSentence[fStart+3] == 'G') &&
+          ((char)nmeaSentence[fStart+4] == 'G') &&
+          ((char)nmeaSentence[fStart+5] == 'A') )
     {
       return true;
     }
-    else if ( strcmp(cmd,"DTM") == 0 )
+    else if ( ((char)nmeaSentence[fStart+3] == 'D') &&
+          ((char)nmeaSentence[fStart+4] == 'T') &&
+          ((char)nmeaSentence[fStart+5] == 'M') )
     {
       return true;
     }
@@ -1188,20 +1413,23 @@ bool ParseNMEA(char *nmeaChars, int iChars)
         return true;
     } // end of if/else block parsing standard NMEA sentences
   }
-  else if (strncmp(&nmeaChars[ID_start],"$PUBX",5) == 0)
+  else if ( ((char)nmeaSentence[fStart] == '$') &&
+          ((char)nmeaSentence[fStart+1] == 'P') &&
+          ((char)nmeaSentence[fStart+2] == 'U') &&
+          ((char)nmeaSentence[fStart+3] == 'B') &&
+          ((char)nmeaSentence[fStart+4] == 'X'))
   {
     // this is a UBX proprietary sentence
+    //  check field 1 for the sentence type
     //
-    int f1_start;
-    int f1_len;
-
-    f1_start = fieldStart[1];
-    f1_len = fieldStart[2] - f1_start - 1;
-    if (strncmp(&nmeaChars[f1_start],"04",2) == 0)
+    fStart = fieldStart[1];
+    fLen = fieldStart[2] - fStart - 1;
+    if ( ((char)nmeaSentence[fStart] == '0') &&
+          ((char)nmeaSentence[fStart+1] == '4') )
     {
       // PUBX,04 sentence
       //
-      
+      return true;
     } 
     else
     {
@@ -1229,7 +1457,7 @@ bool ParseNMEA(char *nmeaChars, int iChars)
 //    fieldCount = # of fields (including CRLF)
 //=============================================================
 
-bool ParseRMC(uint8_t *nmeaChars, int *fieldStart, int fieldCount)
+bool ParseRMC()
 {
   int iStart;
   int iLen;
@@ -1245,12 +1473,12 @@ bool ParseRMC(uint8_t *nmeaChars, int *fieldStart, int fieldCount)
   {
     return false; 
   }
-  gpsRMC.hh[0] = nmeaChars[iStart++];
-  gpsRMC.hh[1] = nmeaChars[iStart++];
-  gpsRMC.mm[0] = nmeaChars[iStart++];
-  gpsRMC.mm[1] = nmeaChars[iStart++];  
-  gpsRMC.ss[0] = nmeaChars[iStart++];  
-  gpsRMC.ss[1] = nmeaChars[iStart++];  
+  gpsRMC.hh[0] = nmeaSentence[iStart++];
+  gpsRMC.hh[1] = nmeaSentence[iStart++];
+  gpsRMC.mm[0] = nmeaSentence[iStart++];
+  gpsRMC.mm[1] = nmeaSentence[iStart++];  
+  gpsRMC.ss[0] = nmeaSentence[iStart++];  
+  gpsRMC.ss[1] = nmeaSentence[iStart++];  
 
   // all done
   //
@@ -1268,10 +1496,10 @@ bool ParseRMC(uint8_t *nmeaChars, int *fieldStart, int fieldCount)
 // ultohex - convert unsigned long to 8 hex MAX7456 characters in a character array
 //
 //===========================================================================
+uint8_t hex[16] = {0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0B,0x0C,0x0D,0x0E,0x0F,0x10};
 void ultohex(uint8_t *dest, unsigned long ul)
 {
 
-  uint8_t hex[16] = {0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0B,0x0C,0x0D,0x0E,0x0F,0x10};
 
   uint8_t *pn;
   unsigned long nibble;
@@ -1302,8 +1530,6 @@ void ultohex(uint8_t *dest, unsigned long ul)
 void bytetohex(uint8_t *dest, uint8_t byt)
 {
 
-  uint8_t hex[16] = {0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0B,0x0C,0x0D,0x0E,0x0F,0x10};
-
   uint8_t nibble;
 
   nibble = (byt & 0xF0) >> 4;
@@ -1321,10 +1547,9 @@ void bytetohex(uint8_t *dest, uint8_t byt)
 //    ul = unsigned long value to convert
 //    len = # of chars to write in destination (pos => leading zeros, negative => leading spaces) 
 //===========================================================================
+#if 0
 void ultodec(uint8_t *dest, unsigned long ul, int len)
 {
-
-  uint8_t dec[10] = {0x0A,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09};
 
   uint8_t *pn;
 
@@ -1357,11 +1582,88 @@ void ultodec(uint8_t *dest, unsigned long ul, int len)
     }
     else
     {
-      *pn = dec[remainder];
+      *pn = hex[remainder];
     }
     pn--;
     
   } // end of for loop through the nibbles
   
 } // end of ultodec
+#endif
+
+//===========================================================================
+//   max of 10 chars , left aligned, no padding
+//===========================================================================
+unsigned long powers[10] = {
+  1000000000,
+  100000000,
+  10000000,
+  1000000,
+  100000,
+  10000,
+  1000,
+  100,
+  10,
+  1
+};
+void ultodec(uint8_t *dest, unsigned long ul, int total)
+{
+  unsigned long pwr10;
+  uint8_t digit;
+  uint8_t count = 0;
+  uint8_t start = 0;
+
+  // check for fixed length zero padding
+  //
+  if ((total > 0) && (total <= 10))
+  {
+    count = 1;     // => pad with leading zeros
+    start = 10 - total;
+  }
+  // check each power from high to low - find the divisor at each level
+  //
+  for(int i = 0; i < 10; i++)
+  {
+    pwr10 = powers[i];
+    if (pwr10 > ul)
+    {
+      if (count > 0)
+      {
+        // we already have some digits (or we are zero padding) => add a zero in this position
+        //
+        if ( i >= start)
+        {
+          *dest = hex[digit];
+          dest++;
+          count++;
+        }
+      }
+      // current number is lower than this...
+      continue;
+    }
+    else
+    {
+      // current number (ul) is higher or equal to the current power of 10
+      //
+      digit = 0;
+      while( pwr10 < ul)
+      {
+        ul -= pwr10;
+        digit++;
+      }
+      // current number is now less than current power (pwr10)
+      // AND ul was digit * pwr10
+      //   set the destination char
+      //
+      if ( i >= start)
+      {
+        *dest = hex[digit];
+        dest++;
+        count++;              // # of digits written so far
+      }
+    }
+  } // end of loop through powers
+
+} // end of ultodec
+
 
