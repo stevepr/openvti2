@@ -272,6 +272,7 @@ void setup() {
   //OSD.setSyncSource(MAX7456_EXTSYNC);
   OSD.setSyncSource(MAX7456_AUTOSYNC);
   OSD.setWhiteLevel(0);  // should be 0% black 120% white
+  OSD.setCharEncoding(MAX7456_ASCII);       // use this char set
 
   // align with IOTA-VTI
   OSD.setTextOffset(OSD_X_OFFSET, OSD_Y_OFFSET);
@@ -282,6 +283,23 @@ void setup() {
   // wait for VSYNC to start
   while (OSD.notInVSync());                   // Wait for VSync to start
 
+  //*************************
+  //  setup Timer 1 first
+  //    * this is our time base
+  //    2hmz time clock
+  //
+  TIMSK1 = 0;                               // disable all timer 1 ints
+  TCCR1A = 0;                               // normal mode
+  TCCR1B = (1 << CS11);                     // 2mhz
+  TCCR1C = 0;                               // normal mode
+  
+  TCNT1 = 0;                                // reset count
+  TIFR1 = 0;                                // reset any pending ints
+  timer1_ov = 0;                            // reset overflow count
+
+  TIMSK1 = (1 << TOIE1);                    // enable overflow int only (for now)
+  PRR &= ~(1 << PRTIM1);                    // turn on timer 1
+  
   //*************
   // setup interrupt sources
   //  * PPS
@@ -302,33 +320,19 @@ void setup() {
   //  connected to Timer1 ICP falling edge (start of horizontal blanking)
   //  enable Hsync first to generate these times before vsync starts up
   //
+  fieldSync = false;                        // not time to sync fields yet...
   tk_HSYNC = 0;
   HSYNC_CFG_INPUT();
-  TIMSK1 = 0;                               // disable all timer 1 ints
-  TCCR1A = 0;                               // normal mode
-  TCCR1B = (1 << CS11);                     // falling edge ICP & 2mhz
-  TCCR1C = 0;                               // normal mode
+  TCCR1B &= ~(1 << ICES1);                  // falling edge trigger for HSYNC (start of horizontal blanking)
+  TIMSK1 |= (1 << ICIE1);                   // enable ICP interrupt
   
-  TCNT1 = 0;                                // reset count
-  TIFR1 = 0;                                // reset any pending ints
-  PRR &= ~(1 << PRTIM1);                    // turn on timer 1
-  timer1_ov = 0;                            // reset overflow count
-//  TIMSK1 = (1 << ICIE1) | (1 << TOIE1);     // enable ICP & overflow
-#if 1
-  TIMSK1 = (1 << TOIE1);     // overflow
-  fieldParity = 1;
-  fieldSync = false;
-#endif
-
   // wait 50ms before tracking VSYNC
   //
   delay(50);
   
   // VSYNC
   //
-#if 0
-//  fieldSync = true;       // look for field 1/ field 2
-#endif
+  fieldSync = true;       // now look for field 1/ field 2 during VSYNC
 
   tk_VSYNC = 0;
   VSYNC_CFG_INPUT();
@@ -336,20 +340,19 @@ void setup() {
   VSYNC_CFG_PCMSK();
   VSYNC_CFG_EIMSK();
 
-  // now turn off hsync ICP interrupt
+  //************************
+  // Startup field detection
   //
-  delay(50);
+  //
+  delay(500);                     // wait half a sec (several fields)
+  fieldSync = false;              // and turn off detection
+  TIMSK1 &= ~(1 << ICIE1);        // disable ICP interrupt (don't need HSYNC now)
+  
 
-#if 0  
-//  fieldSync = false;
-//  TIMSK1 &= !(1 << ICIE1);        // turn off ICP ints
-#endif
-
-  blnPE1 = false;
-  blnPE2 = false;
-
+  //*********************
+  //  OK, now start displaying info
+  //
   OSD.home();
-  OSD.setCharEncoding(MAX7456_ASCII);
   EnableOverlay = true;   // start the overlay...
  
 } // end of setup
@@ -379,7 +382,6 @@ void loop() {
 VSYNC_ISR()
 {
   volatile int prevParity;
-  bool ParityError;
   unsigned long timeDiff;
   unsigned long timePrev;
   uint8_t utmp;
@@ -441,7 +443,13 @@ VSYNC_ISR()
   
     if (fieldParity == prevParity)
     {
-      ParityError = true;
+      // we have a problem, flag it and move on
+      //
+      
+      fieldSync = false;      // all done looking for the right field
+      
+      // flag it
+      //
       if (fieldParity == 1)
       {
         blnPE1 = true;
@@ -451,12 +459,7 @@ VSYNC_ISR()
         blnPE2 = true;
       }
     }
-    else
-    {
-      ParityError = false;
-    }
   } // end of fieldSync
-  
   
   //****************************
   //  ENABLE interrupts again
@@ -495,6 +498,13 @@ VSYNC_ISR()
   //    - gps init status
   //
   BottomRow[1] = gpsInitStatus;    // 0 /space => OK
+
+  // check for parity error found
+  //
+  if (blnPE1 || blnPE2)
+  {
+    BottomRow[0] = 0x1A;    // 'P'
+  }
 
   //
   // OSD Bottom Row
