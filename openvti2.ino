@@ -137,6 +137,7 @@ volatile unsigned long fieldCount;
 
 volatile int fieldParity = 0;           // 1=> field 1, 2=> field 2  (0 => not yet set)
 volatile bool fieldSync;                // true => determine field 1 by timing, false => alternate fields on vsync
+                                        //    during field sync, we do not update OSD or check GPS info
 
 bool blnPE1 = false;
 bool blnPE2 = false;
@@ -176,7 +177,7 @@ volatile int pps_SS;
 
 volatile int pps_countdown;           // # of pps interrupts until pps valid - used for synch with NMEA data
 
-// GPS Serial data
+// GPS data
 //
 
 #define NMEA_MAX  201    // max length of a nmea sentence
@@ -188,11 +189,35 @@ int nmeaCount = -1;                   // position of next char in NMEA sentence 
 int fieldStart[MAX_FIELDS];   // start position of each field
                               // end of field = (start of next field - 2)
 
+  // interal Sync'd time = "real" time - one second accuracy
+  //  Three states:
+  //    * Waiting to synchronize (waiting for PPS)
+  //    * Synchronizing (checking multiple PPS & NMEA data for consistency)
+  //    * Synchronized
+  //
+#define SYNC_SECONDS 5    // # of seconds for syncing to GPS time
+short int TimeSync;       // ( < 0 ) => waiting for PPS to begin sync
+                          // ( == 0) => syncronized
+                          // ( > 0 ) => we are syncing to GPS sentence times = # of seconds remaining for sync
+                          
+bool TimeValid;           // true => time is valid (PPS "active")
+bool UTC;                 // true => time is currently UTC, false => time is GPS time
+
+int year;                 // 2 digit
+int mon;
+int day;
+int hh;
+int mm;
+int ss;
+
 typedef struct {
   bool valid;
-  uint8_t hh[2];
-  uint8_t mm[2];
-  uint8_t ss[2];
+  uint8_t hh;
+  uint8_t mm;
+  uint8_t ss;
+  uint8_t yr;
+  uint8_t mon;
+  uint8_t day;
 } nmea_rmc;
 nmea_rmc gpsRMC;
 
@@ -326,9 +351,9 @@ void setup() {
   TCCR1B &= ~(1 << ICES1);                  // falling edge trigger for HSYNC (start of horizontal blanking)
   TIMSK1 |= (1 << ICIE1);                   // enable ICP interrupt
   
-  // wait 50ms before tracking VSYNC
+  // wait 1ms before tracking VSYNC to allow at least one HSYNC pulse
   //
-  delay(50);
+  delay(1);
   
   // VSYNC
   //
@@ -350,9 +375,10 @@ void setup() {
   
 
   //*********************
-  //  OK, now start displaying info
+  //  OK, startup the regular cycle 
+  //    * start by looking for GPS NMEA and PPS to get in sync
   //
-  OSD.home();
+  TimeSync = -1;          // Not Synchronized
   EnableOverlay = true;   // start the overlay...
  
 } // end of setup
@@ -557,11 +583,16 @@ VSYNC_ISR()
 
   if (gpsRMC.valid)
   {
-    OSD.atomax(BottomRow + 3,gpsRMC.hh,2);
+//    bytetodec2(BottomRow + 3,gpsRMC.hh);
+    ultodec(BottomRow + 3, (unsigned long)gpsRMC.hh, 2);
     BottomRow[5] = 0x44;
-    OSD.atomax(BottomRow + 6,gpsRMC.mm,2);
+
+    bytetodec2(BottomRow + 6,gpsRMC.mm);
+//    ultodec(BottomRow + 6, (unsigned long)gpsRMC.mm, 2);
     BottomRow[8] = 0x44;
-    OSD.atomax(BottomRow + 9,gpsRMC.ss,2);
+
+//    bytetodec2(BottomRow + 9,gpsRMC.ss);
+    ultodec(BottomRow + 9, (unsigned long)gpsRMC.ss, 2);
   }
 
   //**************************
@@ -1260,7 +1291,7 @@ bool ParseRMC()
   int iLen;
 
   gpsRMC.valid = false;
-  
+
   // field 1 = time
   //
   iStart = fieldStart[1];
@@ -1270,13 +1301,28 @@ bool ParseRMC()
   {
     return false; 
   }
-  gpsRMC.hh[0] = nmeaSentence[iStart++];
-  gpsRMC.hh[1] = nmeaSentence[iStart++];
-  gpsRMC.mm[0] = nmeaSentence[iStart++];
-  gpsRMC.mm[1] = nmeaSentence[iStart++];  
-  gpsRMC.ss[0] = nmeaSentence[iStart++];  
-  gpsRMC.ss[1] = nmeaSentence[iStart++];  
-
+#if 1
+  OSD.atomax(TestRow + 2, nmeaSentence + iStart, 6);
+#endif
+  
+  gpsRMC.hh = d2i( &nmeaSentence[iStart]);
+  if (gpsRMC.hh < 0)
+  {
+    gpsRMC.valid = false;
+    return false;
+  }
+  gpsRMC.mm = d2i( &nmeaSentence[iStart+2]);
+  if (gpsRMC.mm < 0)
+  {
+    gpsRMC.valid = false;
+    return false;
+  }
+  gpsRMC.ss = d2i( &nmeaSentence[iStart+4]);
+  if (gpsRMC.ss < 0)
+  {
+    gpsRMC.valid = false;
+    return false;
+  }
   // all done
   //
   gpsRMC.valid = true;
@@ -1363,8 +1409,8 @@ void ultodec(uint8_t *dest, unsigned long ul, int total)
 {
   unsigned long pwr10;
   uint8_t digit;
-  uint8_t count = 0;
-  uint8_t start = 0;
+  uint8_t count = 0;      // > 0 => write zeros
+  uint8_t start = 0;      // # start writing at this index into powers
 
   // check for fixed length zero padding
   //
@@ -1373,7 +1419,9 @@ void ultodec(uint8_t *dest, unsigned long ul, int total)
     count = 1;     // => pad with leading zeros
     start = 10 - total;
   }
+  
   // check each power from high to low - find the divisor at each level
+  //    
   //
   for(int i = 0; i < 10; i++)
   {
@@ -1386,7 +1434,7 @@ void ultodec(uint8_t *dest, unsigned long ul, int total)
         //
         if ( i >= start)
         {
-          *dest = hex[digit];
+          *dest = hex[0x00];
           dest++;
           count++;
         }
@@ -1399,7 +1447,7 @@ void ultodec(uint8_t *dest, unsigned long ul, int total)
       // current number (ul) is higher or equal to the current power of 10
       //
       digit = 0;
-      while( pwr10 < ul)
+      while( pwr10 <= ul)
       {
         ul -= pwr10;
         digit++;
@@ -1416,7 +1464,74 @@ void ultodec(uint8_t *dest, unsigned long ul, int total)
       }
     }
   } // end of loop through powers
-
+  
 } // end of ultodec
 
+//===========================================================================
+// bytetodec2 - convert unsigned byte to zero padded two decimal MAX7456 characters in a character array
+//    dest = ptr to destination of most significant char of decimal number
+//    us = uint8_t value to convert
+//
+//    ** note: if us > 99, nothing is written
+//===========================================================================
+void bytetodec2(uint8_t *dest, uint8_t us)
+{
+  unsigned long pwr10;
+  uint8_t digit;
+  uint8_t count = 0;
+  uint8_t start = 0;
+
+  // sanity check
+  //
+  if (us > 99)
+  {
+    return;     // do nothing
+  }
+
+  // how many 10s?
+  //
+  digit = 0;
+  while( 10 < us)
+  {
+    us -= 10;
+    digit++;
+  }
+  *dest = hex[digit];   // set the char for the 10s
+  dest++;
+
+  // now the 1east significan digit
+  //
+  *dest = hex[us];
+  
+
+} // end of bytetodec2
+
+//===========================================================================
+// d2i - decode two POSITIVE ascii digits to int value
+//          * on error or negative value, returns negative value for error
+//
+//===========================================================================
+int d2i(uint8_t *src)
+{
+    int val;
+    
+    // 0x30 = ASCII '0'
+    //
+    if ((*src < 0x30) || (*src > 0x39))
+    {
+      return -1;
+    }
+
+    val = (*src - 0x30)*10;
+
+    src++;
+    if ((*src < 0x30) || (*src > 0x39))
+    {
+      return -1;
+    }
+    val += (*src - 0x30);
+
+    return val;
+    
+} // end of atob2
 
