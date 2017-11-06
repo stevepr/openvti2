@@ -168,7 +168,7 @@ volatile bool gpsValid = false;           // true => GPS & PPS data currently va
 volatile unsigned long tk_PPS;        // tick "time" of most recent PPS int
 volatile bool pps_now = false;        // true => PPS just happened
                                       
-volatile bool pps_valid = false;      // true => PPS is valid
+volatile bool ppsValid = false;       // true => PPS is valid
 volatile bool time_UTC = false;       // true => time is current UTC , false => time is currently GPS
 
 volatile int pps_HH;                  //  current pps time (HH:MM:SS)
@@ -177,7 +177,7 @@ volatile int pps_SS;
 
 volatile int pps_countdown;           // # of pps interrupts until pps valid - used for synch with NMEA data
 
-// GPS data
+// GPS serial data
 //
 
 #define NMEA_MAX  201    // max length of a nmea sentence
@@ -203,12 +203,14 @@ short int TimeSync;       // ( < 0 ) => waiting for PPS to begin sync
 bool TimeValid;           // true => time is valid (PPS "active")
 bool UTC;                 // true => time is currently UTC, false => time is GPS time
 
-int year;                 // 2 digit
-int mon;
-int day;
-int hh;
-int mm;
-int ss;
+  // YY-MM-DD HH:MM:SS time of current second
+  //
+int sec_Year;                 // 2 digit
+int sec_Mon;
+int sec_Day;
+int sec_hh;
+int sec_mm;
+int sec_ss;
 
 typedef struct {
   bool valid;
@@ -379,6 +381,7 @@ void setup() {
   //    * start by looking for GPS NMEA and PPS to get in sync
   //
   TimeSync = -1;          // Not Synchronized
+  time_UTC = false;
   EnableOverlay = true;   // start the overlay...
  
 } // end of setup
@@ -506,6 +509,15 @@ VSYNC_ISR()
     timeDiff = 0 - (tk_PPS - tk_VSYNC);
   }
 
+  //  watch for LONG delay from PPS
+  //
+  if (timeDiff > 0xFFFFFFF0)
+  {
+    // invalidate synchronization and wait again
+    //
+    TimeSync = -1;
+  }
+
   // convert ticks to 0.1 ms
   //
   timeDiff /= (Timer_Milli / 10);
@@ -513,17 +525,14 @@ VSYNC_ISR()
   //**********************
   //  update display info
   //
-
   if (!EnableOverlay)
   {
     return;   // nope, leave now...
   }
 
+  // field count - always display field count
   //
-  // OSD Bottom Row:
-  //    - gps init status
-  //
-  BottomRow[1] = gpsInitStatus;    // 0 /space => OK
+  ultodec(BottomRow + FIELDTOT_COL,fieldCount,0);     // no padding, left justified
 
   // check for parity error found
   //
@@ -532,68 +541,81 @@ VSYNC_ISR()
     BottomRow[0] = 0x1A;    // 'P'
   }
 
-  //
-  // OSD Bottom Row
-  //    - pps "mark" on first field after PPS
-  //
-  if (pps_now)
+  if (TimeSync < 0)
   {
-    BottomRow[0] = 0xFA;
-    pps_now = false;
+    // waiting to sync
+    //
+    BottomRow[1] = 0x21;  // 'W'  - more later
+      
+  }
+  else if (TimeSync > 0)
+  {
+    // syncing
+    //
+    bytetodec2(BottomRow,(uint8_t)TimeSync);    // count
   }
   else
   {
-    BottomRow[0] = 0x00;
-  }
-
-  // OSD Bottom Row
-  //    - field count & field time
-  //
-
-  // field count
-  //
-  ultodec(BottomRow + FIELDTOT_COL,fieldCount,0);     // no padding, left justified
-
-  // field time
-  //
-  if (fieldParity == 1)
-  {
-    // field 1
+    // TimeSync = 0  => synchronized
     //
-    ultodec(BottomRow + FIELD1TS_COL, timeDiff, 4);  // write field 1 stamp, 4 chars, zero padded
-    for (int i = 0; i < 4; i++)  // clear field 2 stamp
-    {
-      BottomRow[FIELD2TS_COL + i] = 0x00;
-    }
-  }
-  else
-  {
-    // field 2
     //
-    ultodec(BottomRow + FIELD2TS_COL, timeDiff, 4);  // write field 2 stamp, 4 chars, zero padded
-    for (int i = 0; i < 4; i++)  // clear field 1 stamp
+    
+    // time status
+    //
+    BottomRow[1] = (time_UTC? 0x1F : 0x11);       // U or G
+    
+    // OSD Bottom Row
+    //    - pps "mark" on first field after PPS
+    //
+    if (pps_now)
     {
-      BottomRow[FIELD1TS_COL + i] = 0x00;
+      BottomRow[0] = 0xFA;
+      pps_now = false;
     }
-  }
+    else
+    {
+      BottomRow[0] = 0x00;
+    }
+  
+    // OSD Bottom Row
+    //    - field times
+    //
+    if (fieldParity == 1)
+    {
+      // field 1
+      //
+      ultodec(BottomRow + FIELD1TS_COL, timeDiff, 4);  // write field 1 stamp, 4 chars, zero padded
+      for (int i = 0; i < 4; i++)  // clear field 2 stamp
+      {
+        BottomRow[FIELD2TS_COL + i] = 0x00;
+      }
+    }
+    else
+    {
+      // field 2
+      //
+      ultodec(BottomRow + FIELD2TS_COL, timeDiff, 4);  // write field 2 stamp, 4 chars, zero padded
+      for (int i = 0; i < 4; i++)  // clear field 1 stamp
+      {
+        BottomRow[FIELD1TS_COL + i] = 0x00;
+      }
+      
+    }
 
-  // OSD Bottom Row
-  //  - HH:MM:SS time
-  //
-
-  if (gpsRMC.valid)
-  {
-//    bytetodec2(BottomRow + 3,gpsRMC.hh);
-    ultodec(BottomRow + 3, (unsigned long)gpsRMC.hh, 2);
+    // OSD Bottom Row
+    //  - HH:MM:SS time
+    //  
+    bytetodec2(BottomRow + 3,sec_hh);
+    
     BottomRow[5] = 0x44;
 
-    bytetodec2(BottomRow + 6,gpsRMC.mm);
-//    ultodec(BottomRow + 6, (unsigned long)gpsRMC.mm, 2);
+    bytetodec2(BottomRow + 6,sec_mm);
+    
     BottomRow[8] = 0x44;
 
-//    bytetodec2(BottomRow + 9,gpsRMC.ss);
-    ultodec(BottomRow + 9, (unsigned long)gpsRMC.ss, 2);
-  }
+    bytetodec2(BottomRow + 9,sec_ss);
+
+  }  // end of check for TimeSync status
 
   //**************************
   // Update OSD
@@ -614,10 +636,6 @@ VSYNC_ISR()
   }
   
   OSD.sendArray(BOTTOM_ROW*30,BottomRow,30);
-
-#if 1
-  OSD.sendArray(5*30,TestRow,30); // testing...
-#endif
 
 
 #if 1
@@ -644,11 +662,14 @@ VSYNC_ISR()
   {
     saMin = timeDiff;
   }
-  ultodec(TopRow+10,saMin,0);
-  ultodec(TopRow+20,saMax,0);
+  ultodec(TestRow+10,saMin,0);
+  ultodec(TestRow+20,saMax,0);
 
 #endif
 
+#if 1
+  OSD.sendArray(5*30,TestRow,30); // testing...
+#endif
 
 } // end of VSYNC_ISR
 
@@ -687,14 +708,119 @@ PPS_ISR()
   //   falling edge => start of Horizontal blanking
   //
   timeCurrent = GetTicks(TCNT);
-
-  // 
+  
+  // save the previous value for compare
   //
   timePrev = tk_PPS;
   tk_PPS = timeCurrent;
+  
+  // OK to enable ints
+  //
+  interrupts();
 
+  //  flag for "flash" on PPS
   //
   pps_now = true;
+
+  // delay from last PPS
+  //
+  if (timeCurrent > timePrev)
+  {
+    timeDiff = timeCurrent - timePrev;
+  }
+  else
+  {
+    timeDiff = 0 - (timePrev - timeCurrent);
+  }
+
+  //  what is our sychronizing status?
+  //
+  if (TimeSync == 0)
+  {
+    // already synchronized , increment the time
+    //
+    SecInc();
+
+    // was the last PPS about a second ago?
+    //
+    if ( (timeDiff < (Timer_Second - Timer_Milli)) || (timeDiff > (Timer_Second + Timer_Milli)))
+    {
+      // opps - not close enough to a one second difference => restart the process
+      //
+      ppsValid = false;
+    }
+
+  }
+  else if (TimeSync < 0)
+  {
+    // we are waiting to synchronize
+    //  if we have a valid time from the serial data, start the process
+    //
+    if (!gpsRMC.valid)
+    {
+      // no valid RMC, keep waiting
+      return;
+    }
+    else
+    {
+      // RMC time should correspond to the PREVIOUS second
+      //
+      sec_ss = gpsRMC.ss;
+      sec_mm = gpsRMC.mm;
+      sec_hh = gpsRMC.hh;
+      SecInc();             // bump the count by one to match the second for THIS PPS signal
+    }
+
+    // we will check the next five seconds for consistency
+    //
+    TimeSync = 5;
+    
+  }
+  else
+  {
+    // TimeSync > 0 => we are synchronizing now
+    //
+
+    // validation 1 : was last PPS about one second away?
+    //
+    if ( (timeDiff < (Timer_Second - Timer_Milli)) || (timeDiff > (Timer_Second + Timer_Milli)))
+    {
+      // opps - not close enough to a one second difference => restart the process
+      //
+      TimeSync = -1;      // waiting to sync again
+      return;
+    }
+
+    // validation 2 : check the time stamp
+    //   we have not yet incremented the time, so it should match the current NMEA value
+    //
+    if (!gpsRMC.valid)
+    {
+      // failed - restart
+      TimeSync = -1;
+      return;
+    }
+    else if ((gpsRMC.hh != sec_hh) || (gpsRMC.mm != sec_mm) || (gpsRMC.ss != sec_ss))
+    {
+      // failed
+      //
+      TimeSync = -1;
+      return;
+    }
+    
+    // passed: bump the time and decrement the count
+    //
+    SecInc();  
+    TimeSync --;
+
+    // are we all done?
+    //
+    if (TimeSync == 0)
+    {
+      ppsValid == true;
+      gpsValid == true;
+    }
+  }
     
 } // end of PPS_ISR
 
@@ -742,6 +868,28 @@ unsigned long GetTicks(CountSource src)
   return( tickCount );
 
 } // end of GetTicks()
+
+//=================================================
+//  SecInc - increment second
+//=================================================
+void SecInc()
+{
+  sec_ss++;
+  if (sec_ss == 60)
+  {
+    sec_ss = 0;
+    sec_mm++;
+    if (sec_mm == 60)
+    {
+      sec_mm = 0;
+      sec_hh++;
+      if (sec_hh == 24)
+      {
+        sec_hh = 0;
+      }
+    }
+  }
+} // end of SecInc
 
 //**********************************************************************************************************
 // NEO 6 GPS routines
@@ -1301,9 +1449,6 @@ bool ParseRMC()
   {
     return false; 
   }
-#if 1
-  OSD.atomax(TestRow + 2, nmeaSentence + iStart, 6);
-#endif
   
   gpsRMC.hh = d2i( &nmeaSentence[iStart]);
   if (gpsRMC.hh < 0)
@@ -1491,7 +1636,7 @@ void bytetodec2(uint8_t *dest, uint8_t us)
   // how many 10s?
   //
   digit = 0;
-  while( 10 < us)
+  while( 10 <= us)
   {
     us -= 10;
     digit++;
