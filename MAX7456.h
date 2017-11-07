@@ -266,7 +266,6 @@
 
       void          sendArray(uint16_t uAddr, uint8_t* cArray, int len);
       void          atomax( uint8_t* , uint8_t* , int );
-      unsigned long          atomaxT( uint8_t* , uint8_t* , int );
       
     private:
     

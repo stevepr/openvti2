@@ -203,6 +203,8 @@ short int TimeSync;       // ( < 0 ) => waiting for PPS to begin sync
                           
 bool TimeValid;           // true => time is valid (PPS "active")
 
+char msgGPSfail[] ="GPS init failed";
+#define len_msgGPSfail  15
 char msgWaiting[] = "Waiting for GPS";
 #define len_msgWaiting  15
 char msgSync[] = "Sync ";         // space for remainder
@@ -429,6 +431,7 @@ VSYNC_ISR()
   unsigned long timeDiff;
   unsigned long timePrev;
   uint8_t utmp;
+  unsigned long ulTmp;
 
   //**************
   // Get the time of this VSYNC
@@ -581,22 +584,64 @@ VSYNC_ISR()
 
   // Determine the current state of the GPS sync
   //    if (waiting for valid GPS PPS)
-  //      display only field counter
+  //      display field ticks & field counter
   //    else if (PPS valid and synching)
-  //      display field count and countdown
+  //      display field ticks, field count and countdown
   //    else
   //      gps valid - display full dataset
   //
   if (TimeSync < 0)
   {
-    // waiting to sync - show message
+    // waiting to sync - show message on bottom line with field count
     //
-    OSD.atomax(&BottomRow[1],(uint8_t*)msgWaiting,len_msgWaiting);
+    if (gpsInitStatus == 0)
+    {
+      // GPS init successful
+      //
+      OSD.atomax(&BottomRow[1],(uint8_t*)msgWaiting,len_msgWaiting);
+    }
+    else
+    {
+      // GPS init failed
+      OSD.atomax(&BottomRow[1],(uint8_t*)msgGPSfail,len_msgGPSfail);
+      bytetodec2(&BottomRow[1 + len_msgGPSfail + 1],gpsInitStatus);
+    }
+    
+    // Top Line: field ticks
+    //
+    if (fieldParity == 1)
+    {
+      // field 1
+      ultodec(TopRow + 1, tk_VSYNC, 10);  // write field 1 tick count
+    }
+    else
+    {
+      // field 2
+      //
+      ultodec(TopRow + 15, tk_VSYNC, 10);  // write field 2 tick count
+    }
       
   }
   else if (TimeSync > 0)
   {
-    // syncing - show SYNC and count
+    // syncing
+    //
+    
+    // Top Line: field ticks
+    //
+    if (fieldParity == 1)
+    {
+      // field 1
+      ultodec(TopRow + 1, tk_VSYNC, 10);  // write field 1 tick count
+    }
+    else
+    {
+      // field 2
+      //
+      ultodec(TopRow + 15, tk_VSYNC, 10);  // write field 2 tick count
+    }
+
+    // Bottom Row - sync count & field count (already written)
     //
     OSD.atomax(&BottomRow[1],(uint8_t*)msgSync,len_msgSync);
     ultodec(&BottomRow[1 + len_msgSync + 1],(unsigned long)TimeSync,0);
@@ -646,7 +691,7 @@ VSYNC_ISR()
       //
       switch (osdRotation)
       {
-#if 1        
+#if 0        
         case 0:
           // Date dd-mm-yyyy
           //
@@ -662,7 +707,7 @@ VSYNC_ISR()
           }
           break;
 #endif
-#if 1        
+#if 0        
         case 1:
           // Lat/Long
           //
@@ -675,7 +720,7 @@ VSYNC_ISR()
           }
           break;
 #endif         
-#if 1 
+#if 0 
         case 2:      
           // altitude 
           //    MSL & geoid separation
@@ -691,7 +736,7 @@ VSYNC_ISR()
           }
           break;
 #endif          
-#if 1    
+#if 0    
         case 3:
           TopRow[1] = 0x20;   // V
           TopRow[3] = 0x05;   // 5
@@ -858,6 +903,13 @@ PPS_ISR()
   //
   pps_now = true;
 
+  // if GPS init failed, skip all attempt to sync or display times....
+  //
+  if (gpsInitStatus != 0)
+  {
+    return;
+  }
+  
   // rotation counter
   //
   osdRotation++;
@@ -874,6 +926,14 @@ PPS_ISR()
   {
     timeDiff = 0 - (timePrev - timeCurrent);
   }
+  
+  // check for missing PPS pulses
+  //  if we missed any PPS pulses, we must re-sync
+  //
+  if (timeDiff > (Timer_Second + Timer_Milli))
+  {
+    TimeSync = -1;
+  }
 
   //  what is our sychronizing status?
   //
@@ -881,7 +941,7 @@ PPS_ISR()
   {
     // already synchronized
     //
-
+        
     // check for switch from GPS to UTC time
     //
     if (!time_UTC)
@@ -964,7 +1024,7 @@ PPS_ISR()
       return;
     }
     
-    // this ppd passed the test: bump the time and decrement the count
+    // this pps passed the test: bump the time and decrement the count
     //
     SecInc();  
     TimeSync --;
@@ -1089,6 +1149,7 @@ void SecInc()
 #define gps_E_DTM     3
 #define gps_E_PUBX04  4
 #define gps_E_CFGTP   5
+#define gps_E_CFGDTM  6
 
 //=================================================
 //  gpsInit - initialize GPS device
@@ -1190,12 +1251,14 @@ int gpsInit()
     return gps_E_PUBX04;
   }
 
+  // configure timepulse
+  //
   ubxSend(configTimepulse,sizeof(configTimepulse)/sizeof(uint8_t));
   if (!ubxGetAck(configTimepulse))
   {
     return gps_E_CFGTP;
   }
-
+ 
   return gps_OK;
   
 } // end of gpsInit

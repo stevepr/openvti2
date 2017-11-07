@@ -2054,37 +2054,6 @@ uint8_t * heapptr, * stackptr;
     }
 
   } // end of atomax
-  unsigned long MAX7456::atomaxT( uint8_t *dest, uint8_t *src, int len )
-  {
-    uint8_t tmp;
-uint8_t * heapptr, * stackptr;
-  stackptr = (uint8_t *)malloc(4);          // use stackptr temporarily
-  heapptr = stackptr;                     // save value of heap pointer
-  free(stackptr);      // free up the memory again (sets stackptr to 0)
-  stackptr =  (uint8_t *)(SP);           // save value of stack pointer
-    
-    while ( len > 0)
-    {
-      tmp = *src;
-      if (tmp >= 128)
-      {
-        tmp = 0;
-      }
-      else
-      {
-        tmp = defaultCodePage[tmp];
-      }
-
-      *dest = tmp;
-      
-      dest++;
-      src++;
-      len--;
-    }
-
-    return( stackptr - heapptr );
-
-  } // end of atomax
 
 // Private Methods /////////////////////////////////////////////////////////////
 
