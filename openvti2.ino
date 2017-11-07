@@ -251,8 +251,8 @@ struct {
 
 struct {
   bool valid;
-  uint8_t leap;           // current leap seconds
-  bool  leap_default;     // true => leap seconds is firmware default and not yet updated from almanac
+  uint8_t usLeapSec;      // current leap seconds
+  bool  blnLeapValid;     // true => leap seconds is up to date, false => using firmware default value
 } gpsPUBX04;
 
 
@@ -599,7 +599,7 @@ VSYNC_ISR()
     // syncing - show SYNC and count
     //
     OSD.atomax(&BottomRow[1],(uint8_t*)msgSync,len_msgSync);
-    ultodec(&BottomRow[1 + len_msgSync],(unsigned long)TimeSync,0);
+    ultodec(&BottomRow[1 + len_msgSync + 1],(unsigned long)TimeSync,0);
   }
   else
   {
@@ -608,33 +608,29 @@ VSYNC_ISR()
     //
     if (!ppsValid)
     {
-      // Top Line: PPS ticks and field ticks
+      // Top Line: field ticks
       //
-      TopRow[1] = 0x1A;   // 'P'
-      TopRow[2] = 0x1A;   // 'P'
-      TopRow[3] = 0x1D;   // 'S'
-      ultodec(TopRow + 5, tk_PPS, 10);      // 10 decimal chars for PPS ticks (ending in col 14)
 
       // field count
       //
-      TopRow[16] = 0x10;  // 'F'
       if (fieldParity == 1)
       {
         // field 1
-        TopRow[17] = 0x01;  // '1'
-        ultodec(TopRow + 19, tk_VSYNC, 10);  // write field 1 tick count
+        ultodec(TopRow + 1, tk_VSYNC, 10);  // write field 1 tick count
       }
       else
       {
         // field 2
         //
-        TopRow[17] = 0x02;  // '2'
-        ultodec(TopRow + 19, tk_VSYNC, 10);  // write field 2 tick count
+        ultodec(TopRow + 15, tk_VSYNC, 10);  // write field 2 tick count
       }
 
-      // bottom line - message & field count (already written)
+      // bottom line - message & PPS & field count (already written)
       //
       OSD.atomax(&BottomRow[1], (uint8_t*)msgNoPPS, len_msgNoPPS);
+
+      ultodec(BottomRow + 1 + len_msgNoPPS + 1, tk_PPS, 10);      // 10 decimal chars for PPS ticks
+      
     }
     else
     {
@@ -651,28 +647,56 @@ VSYNC_ISR()
       switch (osdRotation)
       {
         case 0:
+          // Date dd-mm-yyyy
+          //
+          if (gpsRMC.valid)
+          {
+            bytetodec2(TopRow + 1,gpsRMC.day);
+            TopRow[3] = 0x49;   // '-'
+            bytetodec2(TopRow + 4,gpsRMC.mon);
+            TopRow[6] = 0x49;   // '-'
+            TopRow[7] = 0x02;   // '2'
+            TopRow[8] = 0x0A;   // '0'
+            bytetodec2(TopRow + 9,gpsRMC.yr);
+          }
           break;
 
         case 1:
+          // Lat/Long
+          //
+          if (gpsGGA.valid)
+          {
+            TopRow[1] = (gpsGGA.NS == 'N')? 0x18 : 0x1D;   // N or S
+            OSD.atomax(TopRow + 3, gpsGGA.lat,MAX_LATLONG);
+            TopRow[3 + MAX_LATLONG + 1] = (gpsGGA.EW == 'E')? 0x0F : 0x21;   // E or W
+            OSD.atomax(TopRow + 3 + MAX_LATLONG + 3,gpsGGA.lng, MAX_LATLONG);
+          }
           break;
           
         case 2:
+          // altitude 
+          //    MSL & geoid separation
+          if (gpsGGA.valid)
+          {
+            TopRow[1] = 0x17;   // M
+            TopRow[2] = 0x1D;   // S
+            TopRow[3] = 0x16;   // L
+            OSD.atomax(TopRow + 5,gpsGGA.alt_msl,MAX_ALT);
+
+            TopRow[5 + MAX_ALT + 1] = 0x18;    // N
+            OSD.atomax(TopRow + 5 + MAX_ALT + 3, gpsGGA.geoid_sep, MAX_ALT);
+          }
           break;
           
         case 3:
+          TopRow[1] = 0x20;   // V
+          TopRow[3] = 0x05;   // 5
+          TopRow[4] = 0x41;   // '.'
+          TopRow[5] = 0x0A;   // 0
           break;
           
         default:
           break;
-      }
-      
-      if (gpsPUBX04.valid)
-      {
-        bytetodec2(TopRow + 2, gpsPUBX04.leap);
-        if (gpsPUBX04.leap_default)
-        {
-          TopRow[4] = 0x0E;   // 'D'
-        }
       }
 
       // OSD Bottom Row ...
@@ -857,7 +881,10 @@ PPS_ISR()
     //
     if (!time_UTC)
     {
-      if (gpsPUBX04.valid && gpsPUBX04.leap_default)
+      // time has been GPS based
+      //  - check for valid almanac before moving on
+      //
+      if (gpsPUBX04.valid && gpsPUBX04.blnLeapValid)
       {
         // aha... we have switched from GPS time to UTC => reset seconds...
         //
@@ -951,11 +978,11 @@ PPS_ISR()
       sec_hh = gpsRMC.hh;
       SecInc();             // bump the count by one to match the second for THIS PPS signal
 
-      // check leap second status
+      // check for leap second status of the time from RMC
       //
-      if (!gpsPUBX04.leap_default)
+      if (gpsPUBX04.blnLeapValid)
       {
-        // not default leap seconds => we have an almanac => UTC time
+        // we have an almanac => UTC time
         //
         time_UTC = true;
       }
@@ -964,7 +991,7 @@ PPS_ISR()
         // using default leap seconds... increment time by leap seconds to match GPS time
         //
         time_UTC = false;
-        for(int i = 0; i < gpsPUBX04.leap; i++)
+        for(int i = 0; i < gpsPUBX04.usLeapSec; i++)
         {
           SecInc();
         }
@@ -1790,7 +1817,7 @@ bool ParseRMC()
   {
     return false;
   }
-  
+
   //******************************
   // field 1 = HH:MM:SS time
   //
@@ -1832,8 +1859,8 @@ bool ParseRMC()
     return false; 
   }
   
-  gpsRMC.yr = d2i( &nmeaSentence[iStart]);
-  if (gpsRMC.yr < 0)
+  gpsRMC.day = d2i( &nmeaSentence[iStart]);
+  if (gpsRMC.day < 0)
   {
     gpsRMC.valid = false;
     return false;
@@ -1844,8 +1871,8 @@ bool ParseRMC()
     gpsRMC.valid = false;
     return false;
   }
-  gpsRMC.day = d2i( &nmeaSentence[iStart+4]);
-  if (gpsRMC.day < 0)
+  gpsRMC.yr = d2i( &nmeaSentence[iStart+4]);
+  if (gpsRMC.yr < 0)
   {
     gpsRMC.valid = false;
     return false;
@@ -1914,7 +1941,7 @@ bool ParsePUBX04()
   {
     return false;
   }
-  gpsPUBX04.leap = (uint8_t)iTmp;
+  gpsPUBX04.usLeapSec = (uint8_t)iTmp;
 
   // is this terminated with a 'D' to indicate no almanac yet?
   //
@@ -1922,13 +1949,15 @@ bool ParsePUBX04()
   {
     // no terminating 'D' => alamanac is up to date and time is UTC
     //
-    gpsPUBX04.leap_default = false;
+    gpsPUBX04.blnLeapValid = true;
   }
   else
   {
+    // terminatinting D => using firmware default leap seconds
+    //
     if (nmeaSentence[iStart + 2] == 'D')
     {
-      gpsPUBX04.leap_default = true;
+      gpsPUBX04.blnLeapValid = false;
     }
     else
     {
