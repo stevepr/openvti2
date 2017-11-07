@@ -145,6 +145,8 @@ bool blnPE2 = false;
 volatile unsigned long tk_VSYNC;      // vsync "time" = 2mhz ticks
 volatile unsigned long tk_HSYNC;      // hsync "time" = 2mhz ticks
 
+volatile unsigned short osdRotation = 0;             // rotation counter for top row
+
 #if 1
 volatile unsigned long saMin=0xFFFFFFFF;
 volatile unsigned long saMax=0x00;
@@ -161,7 +163,6 @@ volatile unsigned short timer1_ov;    // timer 1 overflow count = high word of "
 // GPS info
 // 
 int gpsInitStatus;                        // GPS initialization status (0 => good)
-volatile bool gpsValid = false;           // true => GPS & PPS data currently valid
 
 // PPS
 //
@@ -169,7 +170,7 @@ volatile unsigned long tk_PPS;        // tick "time" of most recent PPS int
 volatile bool pps_now = false;        // true => PPS just happened
                                       
 volatile bool ppsValid = false;       // true => PPS is valid
-volatile bool time_UTC = false;       // true => time is current UTC , false => time is currently GPS
+volatile bool time_UTC = false;       // true => time is currently UTC , false => time is currently GPS
 
 volatile int pps_HH;                  //  current pps time (HH:MM:SS)
 volatile int pps_MM;
@@ -201,7 +202,13 @@ short int TimeSync;       // ( < 0 ) => waiting for PPS to begin sync
                           // ( > 0 ) => we are syncing to GPS sentence times = # of seconds remaining for sync
                           
 bool TimeValid;           // true => time is valid (PPS "active")
-bool UTC;                 // true => time is currently UTC, false => time is GPS time
+
+char msgWaiting[] = "Waiting for GPS";
+#define len_msgWaiting  15
+char msgSync[] = "Sync ";         // space for remainder
+#define len_msgSync  4
+char msgNoPPS[] = "*NO PPS*";
+#define len_msgNoPPS 8
 
   // YY-MM-DD HH:MM:SS time of current second
   //
@@ -212,33 +219,41 @@ int sec_hh;
 int sec_mm;
 int sec_ss;
 
-typedef struct {
+struct {
   bool valid;
+  char mode;          // A or D => valid fix
   uint8_t hh;
   uint8_t mm;
   uint8_t ss;
   uint8_t yr;
   uint8_t mon;
   uint8_t day;
-} nmea_rmc;
-nmea_rmc gpsRMC;
+} gpsRMC;
 
-/* This function places the current value of the heap and stack pointers in the
- * variables. You can call it from any place in your code and save the data for
- * outputting or displaying later. This allows you to check at different parts of
- * your program flow.
- * The stack pointer starts at the top of RAM and grows downwards. The heap pointer
- * starts just above the static variables etc. and grows upwards. SP should always
- * be larger than HP or you'll be in big trouble! The smaller the gap, the more
- * careful you need to be. Julian Gall 6-Feb-2009.
- */
-uint8_t * heapptr, * stackptr;
-void check_mem() {
-  stackptr = (uint8_t *)malloc(4);          // use stackptr temporarily
-  heapptr = stackptr;                     // save value of heap pointer
-  free(stackptr);      // free up the memory again (sets stackptr to 0)
-  stackptr =  (uint8_t *)(SP);           // save value of stack pointer
-}
+#define MAX_LATLONG 12
+#define MAX_ALT 10
+struct {
+  bool valid;
+  uint8_t lat[MAX_LATLONG];     // latitude
+  uint8_t NS;                   // North / South indicator for latitude
+  uint8_t lng[MAX_LATLONG];     // longitude
+  uint8_t EW;                   // East / West indicator for longitude
+  uint8_t alt_msl[MAX_ALT];     // MSL altitude
+  uint8_t alt_units;            // units for altitude (should be m for meters)
+  uint8_t geoid_sep[MAX_ALT];   // geoid separation (N)
+  uint8_t sep_units;            // units for geoid separation 
+} gpsGGA;
+
+struct {
+  bool valid;
+  bool dtmWGS84;      // true => datum is currently WGS84
+} gpsDTM;
+
+struct {
+  bool valid;
+  uint8_t leap;           // current leap seconds
+  bool  leap_default;     // true => leap seconds is firmware default and not yet updated from almanac
+} gpsPUBX04;
 
 
 //========================================
@@ -509,7 +524,22 @@ VSYNC_ISR()
     timeDiff = 0 - (tk_PPS - tk_VSYNC);
   }
 
-  //  watch for LONG delay from PPS
+  //
+  // was the last PPS more than one second ago?
+  //
+  if ( timeDiff > (Timer_Second + 50))
+  {
+    // opps - not close enough to a one second difference => time stamps won't work
+    //
+    ppsValid = false;
+  }
+  else
+  {
+    ppsValid = true;
+  }
+  
+  //  watch for LONG delay from most recent PPS
+  //  if has been too long, we need to wait for the GPS again...
   //
   if (timeDiff > 0xFFFFFFF0)
   {
@@ -530,6 +560,14 @@ VSYNC_ISR()
     return;   // nope, leave now...
   }
 
+  // clear the current info
+  //
+  for( int i = 0; i < 30; i++ )
+  {
+    TopRow[i] = 0x00;
+    BottomRow[i] = 0x00;
+  }
+  
   // field count - always display field count
   //
   ultodec(BottomRow + FIELDTOT_COL,fieldCount,0);     // no padding, left justified
@@ -541,87 +579,156 @@ VSYNC_ISR()
     BottomRow[0] = 0x1A;    // 'P'
   }
 
+  // Determine the current state of the GPS sync
+  //    if (waiting for valid GPS PPS)
+  //      display only field counter
+  //    else if (PPS valid and synching)
+  //      display field count and countdown
+  //    else
+  //      gps valid - display full dataset
+  //
   if (TimeSync < 0)
   {
-    // waiting to sync
+    // waiting to sync - show message
     //
-    BottomRow[1] = 0x21;  // 'W'  - more later
+    OSD.atomax(&BottomRow[1],(uint8_t*)msgWaiting,len_msgWaiting);
       
   }
   else if (TimeSync > 0)
   {
-    // syncing
+    // syncing - show SYNC and count
     //
-    bytetodec2(BottomRow,(uint8_t)TimeSync);    // count
+    OSD.atomax(&BottomRow[1],(uint8_t*)msgSync,len_msgSync);
+    ultodec(&BottomRow[1 + len_msgSync],(unsigned long)TimeSync,0);
   }
   else
   {
     // TimeSync = 0  => synchronized
+    //   check to see if the pps is valid or dropped out
     //
-    //
-    
-    // time status
-    //
-    BottomRow[1] = (time_UTC? 0x1F : 0x11);       // U or G
-    
-    // OSD Bottom Row
-    //    - pps "mark" on first field after PPS
-    //
-    if (pps_now)
+    if (!ppsValid)
     {
-      BottomRow[0] = 0xFA;
-      pps_now = false;
-    }
-    else
-    {
-      BottomRow[0] = 0x00;
-    }
-  
-    // OSD Bottom Row
-    //    - field times
-    //
-    if (fieldParity == 1)
-    {
-      // field 1
+      // Top Line: PPS ticks and field ticks
       //
-      ultodec(BottomRow + FIELD1TS_COL, timeDiff, 4);  // write field 1 stamp, 4 chars, zero padded
-      for (int i = 0; i < 4; i++)  // clear field 2 stamp
+      TopRow[1] = 0x1A;   // 'P'
+      TopRow[2] = 0x1A;   // 'P'
+      TopRow[3] = 0x1D;   // 'S'
+      ultodec(TopRow + 5, tk_PPS, 10);      // 10 decimal chars for PPS ticks (ending in col 14)
+
+      // field count
+      //
+      TopRow[16] = 0x10;  // 'F'
+      if (fieldParity == 1)
       {
-        BottomRow[FIELD2TS_COL + i] = 0x00;
+        // field 1
+        TopRow[17] = 0x01;  // '1'
+        ultodec(TopRow + 19, tk_VSYNC, 10);  // write field 1 tick count
       }
+      else
+      {
+        // field 2
+        //
+        TopRow[17] = 0x02;  // '2'
+        ultodec(TopRow + 19, tk_VSYNC, 10);  // write field 2 tick count
+      }
+
+      // bottom line - message & field count (already written)
+      //
+      OSD.atomax(&BottomRow[1], (uint8_t*)msgNoPPS, len_msgNoPPS);
     }
     else
     {
-      // field 2
+      // pps is good, display the full info
       //
-      ultodec(BottomRow + FIELD2TS_COL, timeDiff, 4);  // write field 2 stamp, 4 chars, zero padded
-      for (int i = 0; i < 4; i++)  // clear field 1 stamp
+
+      // OSD Top Row
+      // Rotate through 
+      //    Date DD-MM-YY
+      //    Lat/Long
+      //    MSL/N/Datum
+      //    Version
+      //
+      switch (osdRotation)
       {
-        BottomRow[FIELD1TS_COL + i] = 0x00;
+        case 0:
+          break;
+
+        case 1:
+          break;
+          
+        case 2:
+          break;
+          
+        case 3:
+          break;
+          
+        default:
+          break;
       }
       
-    }
+      if (gpsPUBX04.valid)
+      {
+        bytetodec2(TopRow + 2, gpsPUBX04.leap);
+        if (gpsPUBX04.leap_default)
+        {
+          TopRow[4] = 0x0E;   // 'D'
+        }
+      }
 
-    // OSD Bottom Row
-    //  - HH:MM:SS time
-    //  
-    bytetodec2(BottomRow + 3,sec_hh);
+      // OSD Bottom Row ...
+      // time base UTC or GPS
+      //
+      BottomRow[1] = (time_UTC? 0x1F : 0x11);       // U (UTC) or G (GPS)
+      
+      //    - pps "mark" on first field after PPS
+      //
+      if (pps_now)
+      {
+        BottomRow[0] = 0xFA;
+        pps_now = false;
+      }
+      else
+      {
+        BottomRow[0] = 0x00;
+      }
     
-    BottomRow[5] = 0x44;
+      // OSD Bottom Row
+      //    - field times
+      //
+      if (fieldParity == 1)
+      {
+        // field 1
+        //
+        ultodec(BottomRow + FIELD1TS_COL, timeDiff, 4);  // write field 1 stamp, 4 chars, zero padded
+      }
+      else
+      {
+        // field 2
+        //
+        ultodec(BottomRow + FIELD2TS_COL, timeDiff, 4);  // write field 2 stamp, 4 chars, zero padded
+     
+      }
+  
+      // OSD Bottom Row
+      //  - HH:MM:SS time
+      //  
+      bytetodec2(BottomRow + 3,sec_hh);
+      
+      BottomRow[5] = 0x44;
+  
+      bytetodec2(BottomRow + 6,sec_mm);
+      
+      BottomRow[8] = 0x44;
+  
+      bytetodec2(BottomRow + 9,sec_ss);
 
-    bytetodec2(BottomRow + 6,sec_mm);
-    
-    BottomRow[8] = 0x44;
-
-    bytetodec2(BottomRow + 9,sec_ss);
-
+    }  // end of check for pps valid
   }  // end of check for TimeSync status
 
   //**************************
   // Update OSD
   //  - send updated info to Max7456
   //
-
 
   timePrev = GetTicks(TCNT);
   OSD.sendArray(TOP_ROW*30,TopRow,30);
@@ -722,6 +829,12 @@ PPS_ISR()
   //
   pps_now = true;
 
+  // rotation counter
+  //
+  osdRotation++;
+  if (osdRotation == 4)
+    osdRotation = 0;
+
   // delay from last PPS
   //
   if (timeCurrent > timePrev)
@@ -737,28 +850,39 @@ PPS_ISR()
   //
   if (TimeSync == 0)
   {
-    // already synchronized , increment the time
+    // already synchronized
+    //
+
+    // check for switch from GPS to UTC time
+    //
+    if (!time_UTC)
+    {
+      if (gpsPUBX04.valid && gpsPUBX04.leap_default)
+      {
+        // aha... we have switched from GPS time to UTC => reset seconds...
+        //
+        sec_ss = gpsRMC.ss;
+        sec_mm = gpsRMC.mm;
+        sec_hh = gpsRMC.hh;
+        SecInc();             // bump the count by one to match the second for THIS PPS signal
+
+        time_UTC = true;      // UTC now
+      }
+    }
+    
+    // increment the time by one second for this PPS
     //
     SecInc();
-
-    // was the last PPS about a second ago?
-    //
-    if ( (timeDiff < (Timer_Second - Timer_Milli)) || (timeDiff > (Timer_Second + Timer_Milli)))
-    {
-      // opps - not close enough to a one second difference => restart the process
-      //
-      ppsValid = false;
-    }
-
+    
   }
   else if (TimeSync < 0)
   {
     // we are waiting to synchronize
     //  if we have a valid time from the serial data, start the process
     //
-    if (!gpsRMC.valid)
+    if ((!gpsRMC.valid) || (!gpsPUBX04.valid))
     {
-      // no valid RMC, keep waiting
+      // no valid RMC or PUBX04, keep waiting
       return;
     }
     else
@@ -768,7 +892,7 @@ PPS_ISR()
       sec_ss = gpsRMC.ss;
       sec_mm = gpsRMC.mm;
       sec_hh = gpsRMC.hh;
-      SecInc();             // bump the count by one to match the second for THIS PPS signal
+      SecInc();             // bump the count by one to match the second for THIS PPS signal    
     }
 
     // we will check the next five seconds for consistency
@@ -794,7 +918,7 @@ PPS_ISR()
     // validation 2 : check the time stamp
     //   we have not yet incremented the time, so it should match the current NMEA value
     //
-    if (!gpsRMC.valid)
+    if ((!gpsRMC.valid) || (!gpsPUBX04.valid))
     {
       // failed - restart
       TimeSync = -1;
@@ -808,17 +932,49 @@ PPS_ISR()
       return;
     }
     
-    // passed: bump the time and decrement the count
+    // this ppd passed the test: bump the time and decrement the count
     //
     SecInc();  
     TimeSync --;
 
-    // are we all done?
+    // are we all done with the sync?
     //
     if (TimeSync == 0)
     {
+      // Set time according to most recent PPS and Leap Second status
+      //
+
+      // RMC time should correspond to the PREVIOUS second
+      //
+      sec_ss = gpsRMC.ss;
+      sec_mm = gpsRMC.mm;
+      sec_hh = gpsRMC.hh;
+      SecInc();             // bump the count by one to match the second for THIS PPS signal
+
+      // check leap second status
+      //
+      if (!gpsPUBX04.leap_default)
+      {
+        // not default leap seconds => we have an almanac => UTC time
+        //
+        time_UTC = true;
+      }
+      else
+      {
+        // using default leap seconds... increment time by leap seconds to match GPS time
+        //
+        time_UTC = false;
+        for(int i = 0; i < gpsPUBX04.leap; i++)
+        {
+          SecInc();
+        }
+        
+      } // end of check for leap second status
+
+      
+      // ready to roll
+      //
       ppsValid == true;
-      gpsValid == true;
     }
   }
     
@@ -1281,8 +1437,8 @@ bool ReadGPS()
 //    currently supports the following sentences
 //        RMC, GGA, DTM, and PUBX,04
 //  INPUTS:
-//    nmeaChars[] - array of chars containing sentence
-//    iChars = # of chars in sentence (including terminating CRLF)
+//    nmeaSentence[] - array of chars containing sentence
+//    nmeaCount = # of chars in sentence (including terminating CRLF)
 //=============================================================
 bool ParseNMEA()
 {
@@ -1376,7 +1532,7 @@ bool ParseNMEA()
           ((char)nmeaSentence[fStart+4] == 'G') &&
           ((char)nmeaSentence[fStart+5] == 'A') )
     {
-      return true;
+      return ParseGGA();
     }
     else if ( ((char)nmeaSentence[fStart+3] == 'D') &&
           ((char)nmeaSentence[fStart+4] == 'T') &&
@@ -1405,7 +1561,7 @@ bool ParseNMEA()
     {
       // PUBX,04 sentence
       //
-      return true;
+      return ParsePUBX04();
     } 
     else
     {
@@ -1426,13 +1582,201 @@ bool ParseNMEA()
 } // end of ParseNMEA
 
 //=============================================================
-//  ParseRMC - parse & save the RMC data of interest
+//  ParseGGA - parse & save the GGA data of interest
 //  INPUTS:
-//    nmeaChars[] - array of chars containing sentence
+//    nmeaSentence[] - array of chars containing sentence
 //    fieldStart[] - array of starting indicies for fields
 //    fieldCount = # of fields (including CRLF)
 //=============================================================
+bool ParseGGA()
+{
+  int iStart;
+  int iLen;
+  char cTmp;
 
+  gpsGGA.valid = false;
+
+  // should be 17 fields including the CRLF at the end
+  //
+  if (fieldCount < 17)
+  {
+    return false;
+  }
+  
+  //******************************
+  // field 2 = Latitude
+  //
+  iStart = fieldStart[2];
+  iLen = fieldStart[3] - iStart - 1;
+
+  if ((iLen < 5) || (iLen > MAX_LATLONG))
+  {
+    return false; 
+  }
+
+  for( int i = 0; i < MAX_LATLONG; i++ )
+  {
+    if (i < iLen)
+    {
+      gpsGGA.lat[i] = nmeaSentence[iStart + i];    
+    }
+    else
+    {
+      gpsGGA.lat[i] = ' ';  // pad with spaces on the end
+    }
+  }
+
+  //**************************
+  // field 3 = N/S for latitude
+  //
+  iStart = fieldStart[3];
+  iLen = fieldStart[4] - iStart - 1;
+
+  if (iLen < 1)
+  {
+    return false; 
+  }
+  gpsGGA.NS = (char)nmeaSentence[iStart];  
+  if ( ((char)gpsGGA.NS != 'N') && ((char)gpsGGA.NS != 'n') && 
+          ((char)gpsGGA.NS != 'S') && ((char)gpsGGA.NS != 's') )
+  {
+    return false;
+  }
+
+  //******************************
+  // field 4 = Longitude
+  //
+  iStart = fieldStart[4];
+  iLen = fieldStart[5] - iStart - 1;
+
+  if ((iLen < 5) || (iLen > MAX_LATLONG))
+  {
+    return false; 
+  }
+
+  for( int i = 0; i < MAX_LATLONG; i++ )
+  {
+    if (i < iLen)
+    {
+      gpsGGA.lng[i] = nmeaSentence[iStart + i];    
+    }
+    else
+    {
+      gpsGGA.lng[i] = ' ';  // pad with spaces on the end
+    }
+  }
+
+  //**************************
+  // field 5 = E/W for Longitude
+  //
+  iStart = fieldStart[5];
+  iLen = fieldStart[6] - iStart - 1;
+
+  if (iLen < 1)
+  {
+    return false; 
+  }
+  gpsGGA.EW = (char)nmeaSentence[iStart];
+  if ( ((char)gpsGGA.EW != 'E') && ((char)gpsGGA.EW != 'e') && 
+          ((char)gpsGGA.EW != 'W') && ((char)gpsGGA.EW != 'w') )
+  {
+    return false;
+  }
+
+  //******************************
+  // field 9 = MSL altitude
+  //
+  iStart = fieldStart[9];
+  iLen = fieldStart[10] - iStart - 1;
+
+  if ((iLen < 1) || (iLen > MAX_ALT))
+  {
+    return false; 
+  }
+
+  for( int i = 0; i < MAX_ALT; i++ )
+  {
+    if (i < iLen)
+    {
+      gpsGGA.alt_msl[i] = nmeaSentence[iStart + i];    
+    }
+    else
+    {
+      gpsGGA.alt_msl[i] = ' ';  // pad with spaces on the end
+    }
+  }
+
+  //**************************
+  // field 10 = units for altitude
+  //
+  iStart = fieldStart[10];
+  iLen = fieldStart[11] - iStart - 1;
+
+  if (iLen < 1)
+  {
+    return false; 
+  }
+  gpsGGA.alt_units = (char)nmeaSentence[iStart];
+  if ((gpsGGA.alt_units != 'M') && (gpsGGA.alt_units != 'm'))      // must be "m"
+  {
+    return false;
+  }
+
+  //******************************
+  // field 11 = geoid separation
+  //
+  iStart = fieldStart[11];
+  iLen = fieldStart[12] - iStart - 1;
+
+  if ((iLen < 1) || (iLen > MAX_ALT))
+  {
+    return false; 
+  }
+
+  for( int i = 0; i < MAX_ALT; i++ )
+  {
+    if (i < iLen)
+    {
+      gpsGGA.geoid_sep[i] = nmeaSentence[iStart + i];    
+    }
+    else
+    {
+      gpsGGA.geoid_sep[i] = ' ';  // pad with spaces on the end
+    }
+  }
+
+  //**************************
+  // field 12 = units for altitude
+  //
+  iStart = fieldStart[12];
+  iLen = fieldStart[13] - iStart - 1;
+
+  if (iLen < 1)
+  {
+    return false; 
+  }
+  gpsGGA.sep_units = (char)nmeaSentence[iStart];
+  if ((gpsGGA.sep_units != 'M') && (gpsGGA.sep_units != 'm'))      // must be "m"
+  {
+    return false;
+  }
+  
+  //**********
+  // all done
+  //
+  gpsGGA.valid = true;
+  
+  return true;
+  
+} // end of parseGGA
+
+//=============================================================
+//  ParseRMC - parse & save the RMC data of interest
+//  INPUTS:
+//    nmeaSentence[] - array of chars containing sentence
+//    fieldStart[] - array of starting indicies for fields
+//    fieldCount = # of fields (including CRLF)
+//=============================================================
 bool ParseRMC()
 {
   int iStart;
@@ -1440,7 +1784,15 @@ bool ParseRMC()
 
   gpsRMC.valid = false;
 
-  // field 1 = time
+  // should be 14 fields including the CRLF at the end
+  //
+  if (fieldCount < 14)
+  {
+    return false;
+  }
+  
+  //******************************
+  // field 1 = HH:MM:SS time
   //
   iStart = fieldStart[1];
   iLen = fieldStart[2] - iStart - 1;
@@ -1468,6 +1820,50 @@ bool ParseRMC()
     gpsRMC.valid = false;
     return false;
   }
+
+  //****************************
+  // field 9 = ddmmyy Date 
+  //
+  iStart = fieldStart[9];
+  iLen = fieldStart[10] - iStart - 1;
+
+  if (iLen < 6)
+  {
+    return false; 
+  }
+  
+  gpsRMC.yr = d2i( &nmeaSentence[iStart]);
+  if (gpsRMC.yr < 0)
+  {
+    gpsRMC.valid = false;
+    return false;
+  }
+  gpsRMC.mon = d2i( &nmeaSentence[iStart+2]);
+  if (gpsRMC.mon < 0)
+  {
+    gpsRMC.valid = false;
+    return false;
+  }
+  gpsRMC.day = d2i( &nmeaSentence[iStart+4]);
+  if (gpsRMC.day < 0)
+  {
+    gpsRMC.valid = false;
+    return false;
+  }
+
+  //**************
+  // field 12 - mode indicator
+  //
+  iStart = fieldStart[12];
+  iLen = fieldStart[13] - iStart - 1;
+
+  if (iLen < 1)
+  {
+    return false; 
+  }
+  gpsRMC.mode = (char)nmeaSentence[iStart];     // mode char
+  
+  //**********
   // all done
   //
   gpsRMC.valid = true;
@@ -1475,6 +1871,79 @@ bool ParseRMC()
   return true;
   
 } // end of parseRMC
+
+//=============================================================
+//  ParsePUBX04 - parse & save the PUBX04 data of interest
+//  INPUTS:
+//    nmeaSentence[] - array of chars containing sentence
+//    fieldStart[] - array of starting indicies for fields
+//    fieldCount = # of fields (including CRLF)
+//=============================================================
+bool ParsePUBX04()
+{
+  int iStart;
+  int iLen;
+  int iTmp;
+
+  gpsPUBX04.valid = false;
+
+  // should be 12 fields including the CRLF at the end
+  //
+  if (fieldCount < 12)
+  {
+    return false;
+  }
+  
+  //******************************
+  // field 6 = LEAP seconds
+  //
+  iStart = fieldStart[6];
+  iLen = fieldStart[7] - iStart - 1;
+
+  // this field should always be two digits with an optional 'D' at the end
+  //
+  if ((iLen < 2) || (iLen > 3))
+  {
+    return false; 
+  }
+
+  // decode the two digit leap second count
+  //
+  iTmp = d2i(&nmeaSentence[iStart]);
+  if (iTmp < 0)
+  {
+    return false;
+  }
+  gpsPUBX04.leap = (uint8_t)iTmp;
+
+  // is this terminated with a 'D' to indicate no almanac yet?
+  //
+  if (iLen == 2)
+  {
+    // no terminating 'D' => alamanac is up to date and time is UTC
+    //
+    gpsPUBX04.leap_default = false;
+  }
+  else
+  {
+    if (nmeaSentence[iStart + 2] == 'D')
+    {
+      gpsPUBX04.leap_default = true;
+    }
+    else
+    {
+      return false;
+    }
+  }
+   
+  //**********
+  // all done
+  //
+  gpsPUBX04.valid = true;
+  
+  return true;
+  
+} // end of parsePUBX04
 
 //*****************************************************************************************
 // Utility routines
@@ -1659,17 +2128,31 @@ void bytetodec2(uint8_t *dest, uint8_t us)
 int d2i(uint8_t *src)
 {
     int val;
-    
-    // 0x30 = ASCII '0'
-    //
-    if ((*src < 0x30) || (*src > 0x39))
+
+    //  first char
+    // 0x20 = ASCII space
+    if (*src == 0x20)
     {
-      return -1;
+      // space for left digit
+      //
+      val = 0;
+      src++;
+    }
+    else
+    {
+      // non-space char
+      if ((*src < 0x30) || (*src > 0x39))   // 0x30 = '0'
+      {
+        return -1;
+      }
+  
+      val = (*src - 0x30)*10;
+  
+      src++;
     }
 
-    val = (*src - 0x30)*10;
-
-    src++;
+    // right most digit
+    //
     if ((*src < 0x30) || (*src > 0x39))
     {
       return -1;
