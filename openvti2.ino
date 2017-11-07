@@ -646,6 +646,7 @@ VSYNC_ISR()
       //
       switch (osdRotation)
       {
+#if 1        
         case 0:
           // Date dd-mm-yyyy
           //
@@ -660,7 +661,8 @@ VSYNC_ISR()
             bytetodec2(TopRow + 9,gpsRMC.yr);
           }
           break;
-
+#endif
+#if 1        
         case 1:
           // Lat/Long
           //
@@ -672,8 +674,9 @@ VSYNC_ISR()
             OSD.atomax(TopRow + 3 + MAX_LATLONG + 3,gpsGGA.lng, MAX_LATLONG);
           }
           break;
-          
-        case 2:
+#endif         
+#if 1 
+        case 2:      
           // altitude 
           //    MSL & geoid separation
           if (gpsGGA.valid)
@@ -687,17 +690,19 @@ VSYNC_ISR()
             OSD.atomax(TopRow + 5 + MAX_ALT + 3, gpsGGA.geoid_sep, MAX_ALT);
           }
           break;
-          
+#endif          
+#if 1    
         case 3:
           TopRow[1] = 0x20;   // V
           TopRow[3] = 0x05;   // 5
           TopRow[4] = 0x41;   // '.'
           TopRow[5] = 0x0A;   // 0
           break;
-          
+#endif
         default:
           break;
       }
+
 
       // OSD Bottom Row ...
       // time base UTC or GPS
