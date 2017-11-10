@@ -96,9 +96,9 @@ uint8_t TestRow[30];
 #endif
 
 // location of UI elements
-#define TOP_ROW 1
-//#define BOTTOM_ROW  12
-#define BOTTOM_ROW  11      // ***for testing
+#define TOP_ROW 11
+#define BOTTOM_ROW  12
+//#define BOTTOM_ROW  11      // ***for testing
 
 // solid character that blinks each PPS we receive
 #define PPSCHAR_COL 1
@@ -115,15 +115,16 @@ uint8_t TestRow[30];
 
 #define FIELDTOT_COL 22
 #define FIELDTOT_ROW BOTTOM_ROW
+#define FIELDTOT_MAX 9999999        // max field count (row is only 29 char wide reliably)
 
 #define FIX_ROW TOP_ROW
 #define FIX_COL 1
 
-#define CYCLE_ROW TOP_ROW
-#define CYCLE_COL 4
+int osdTop_RowOffset = TOP_ROW*30;    // display memory offset to start of ROW for cycling through data
+int osdTop_Col = 1;                   // starting colum in this ROW
 
-#define TIME_ROW BOTTOM_ROW
-#define TIME_COL 3
+int osdBottom_RowOffset = BOTTOM_ROW*30;     // display memory offset to start of ROW for time data
+int osdBottom_Col = 1;
 
 // pixel offset of display    
 #define OSD_X_OFFSET  0
@@ -136,8 +137,10 @@ volatile bool EnableOverlay = false;
 volatile unsigned long fieldCount;
 
 volatile int fieldParity = 0;           // 1=> field 1, 2=> field 2  (0 => not yet set)
-volatile bool fieldSync;                // true => determine field 1 by timing, false => alternate fields on vsync
-                                        //    during field sync, we do not update OSD or check GPS info
+volatile int fieldSync = -1;            // > 0 => running check to identify field 1 from HSYNC/VSYNC timing
+                                        //   == 0 => field parity is set
+                                        // < 0 => no check yet
+
 
 bool blnPE1 = false;
 bool blnPE2 = false;
@@ -211,6 +214,9 @@ char msgSync[] = "Sync ";         // space for remainder
 #define len_msgSync  4
 char msgNoPPS[] = "*NO PPS*";
 #define len_msgNoPPS 8
+
+char msgErrorCodes[] = "   ";
+#define len_msgErrorCodes 3
 
   // YY-MM-DD HH:MM:SS time of current second
   //
@@ -364,7 +370,7 @@ void setup() {
   //  connected to Timer1 ICP falling edge (start of horizontal blanking)
   //  enable Hsync first to generate these times before vsync starts up
   //
-  fieldSync = false;                        // not time to sync fields yet...
+  fieldSync = -1;                        // not time to sync fields yet...
   tk_HSYNC = 0;
   HSYNC_CFG_INPUT();
   TCCR1B &= ~(1 << ICES1);                  // falling edge trigger for HSYNC (start of horizontal blanking)
@@ -376,8 +382,6 @@ void setup() {
   
   // VSYNC
   //
-  fieldSync = true;       // now look for field 1/ field 2 during VSYNC
-
   tk_VSYNC = 0;
   VSYNC_CFG_INPUT();
   VSYNC_CFG_EICRA();
@@ -388,9 +392,18 @@ void setup() {
   // Startup field detection
   //
   //
+  blnPE1 = false;
+  blnPE2 = false;
+  fieldSync = 5;       // now look for field 1/ field 2 during VSYNC
+
   delay(500);                     // wait half a sec (several fields)
-  fieldSync = false;              // and turn off detection
   TIMSK1 &= ~(1 << ICIE1);        // disable ICP interrupt (don't need HSYNC now)
+  if (blnPE1 || blnPE2)
+  {
+      msgErrorCodes[0] = 'e';
+      msgErrorCodes[1] = 'F';   // field parity detect error
+      msgErrorCodes[2] = (blnPE1? '1' : '2');
+  }
   
 
   //*********************
@@ -441,15 +454,23 @@ VSYNC_ISR()
 
   //************************
   // increment field count
+  //  - rollover after maximum value that can be displayed
   //
   fieldCount++;
+  if (fieldCount > FIELDTOT_MAX)
+    fieldCount = 0;
 
   //*******************************************************
   // determine field parity : field 1 or field 2 of a frame
+  //   * NOTE: fieldSync < 0 => do nothing
   //   * during startup, check HSYNC timing vs VSYNC to identify field 1
   //   * after startup, turn off HSYNC ints and alternate fields
   //
-  if (!fieldSync)
+  if (fieldSync < 0)
+  {
+    fieldParity = -1;
+  }
+  else if (fieldSync == 0)
   {
     // after Startup/sync, just alternate fields
     //
@@ -464,6 +485,10 @@ VSYNC_ISR()
   }
   else
   {
+    //  decrement count
+    //
+    fieldSync--;
+    
     // Startup/sync: Field parity detection
     //    Field 1:
     //      prev HSYNC (start of blanking) should be "close" to this VSYNC time
@@ -488,13 +513,10 @@ VSYNC_ISR()
       fieldParity = 2;
     }
   
+    // check for errors 
+    //
     if (fieldParity == prevParity)
-    {
-      // we have a problem, flag it and move on
-      //
-      
-      fieldSync = false;      // all done looking for the right field
-      
+    {     
       // flag it
       //
       if (fieldParity == 1)
@@ -572,15 +594,9 @@ VSYNC_ISR()
   }
   
   // field count - always display field count
+  //   but... rollover after 8 
   //
   ultodec(BottomRow + FIELDTOT_COL,fieldCount,0);     // no padding, left justified
-
-  // check for parity error found
-  //
-  if (blnPE1 || blnPE2)
-  {
-    BottomRow[0] = 0x1A;    // 'P'
-  }
 
   // Determine the current state of the GPS sync
   //    if (waiting for valid GPS PPS)
@@ -626,6 +642,24 @@ VSYNC_ISR()
   {
     // syncing
     //
+
+    // Bottom Row
+    //  - watch for missing PPS
+    //
+    if (!ppsValid)
+    {
+      // we missed at least one PPS 
+      //
+      TimeSync = -1;    // switch to waiting for GPS again...
+      OSD.atomax(&BottomRow[1],(uint8_t*)msgWaiting,len_msgWaiting);
+    }
+    else
+    {
+      // PPS still good - sync count & field count (already written)
+      //
+      OSD.atomax(&BottomRow[1],(uint8_t*)msgSync,len_msgSync);
+      ultodec(&BottomRow[1 + len_msgSync + 1],(unsigned long)TimeSync,0);
+    }
     
     // Top Line: field ticks
     //
@@ -640,11 +674,7 @@ VSYNC_ISR()
       //
       ultodec(TopRow + 15, tk_VSYNC, 10);  // write field 2 tick count
     }
-
-    // Bottom Row - sync count & field count (already written)
-    //
-    OSD.atomax(&BottomRow[1],(uint8_t*)msgSync,len_msgSync);
-    ultodec(&BottomRow[1 + len_msgSync + 1],(unsigned long)TimeSync,0);
+    // all done with synching section...
   }
   else
   {
@@ -691,7 +721,7 @@ VSYNC_ISR()
       //
       switch (osdRotation)
       {
-#if 0        
+        
         case 0:
           // Date dd-mm-yyyy
           //
@@ -706,8 +736,7 @@ VSYNC_ISR()
             bytetodec2(TopRow + 9,gpsRMC.yr);
           }
           break;
-#endif
-#if 0        
+
         case 1:
           // Lat/Long
           //
@@ -719,8 +748,7 @@ VSYNC_ISR()
             OSD.atomax(TopRow + 3 + MAX_LATLONG + 3,gpsGGA.lng, MAX_LATLONG);
           }
           break;
-#endif         
-#if 0 
+
         case 2:      
           // altitude 
           //    MSL & geoid separation
@@ -734,16 +762,22 @@ VSYNC_ISR()
             TopRow[5 + MAX_ALT + 1] = 0x18;    // N
             OSD.atomax(TopRow + 5 + MAX_ALT + 3, gpsGGA.geoid_sep, MAX_ALT);
           }
-          break;
-#endif          
-#if 0    
+          break;       
+
         case 3:
+          // software version
+          //
           TopRow[1] = 0x20;   // V
           TopRow[3] = 0x05;   // 5
           TopRow[4] = 0x41;   // '.'
           TopRow[5] = 0x0A;   // 0
+
+          // error codes
+          //
+          OSD.atomax(TopRow + 7, (uint8_t*) msgErrorCodes, len_msgErrorCodes);
+          
           break;
-#endif
+
         default:
           break;
       }
@@ -803,23 +837,11 @@ VSYNC_ISR()
   // Update OSD
   //  - send updated info to Max7456
   //
+  OSD.sendArray(osdTop_RowOffset,TopRow,30);
 
-  timePrev = GetTicks(TCNT);
-  OSD.sendArray(TOP_ROW*30,TopRow,30);
-  timeDiff = GetTicks(TCNT);
-  if (timeDiff > timePrev)
-  {
-    timeDiff -= timePrev;
-  }
-  else
-  {
-    timeDiff = 0 - (timePrev - timeDiff);
-  }
-  
-  OSD.sendArray(BOTTOM_ROW*30,BottomRow,30);
+  OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
 
-
-#if 1
+#if 0
   // get vsync ISR delay to here
   //
   utmp = SREG;
@@ -848,8 +870,15 @@ VSYNC_ISR()
 
 #endif
 
-#if 1
+#if 0
   OSD.sendArray(5*30,TestRow,30); // testing...
+#else
+  OSD.setCursor(0,5);
+
+  for(int i=0; i< 30; i++)
+  {
+    OSD.write(TestRow[i]);
+  }
 #endif
 
 } // end of VSYNC_ISR
