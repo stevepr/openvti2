@@ -63,38 +63,26 @@
  
 
   // VSYNC 
-  //  connected to edge triggered int
+  //  connected to ICP for Timer 1 = ICP1
   //
-#define VSYNC 2               // legacy definition when using digitalWrite/digitalRead
-#define VSYNC_PIN   PD2       // aka PCINT18
-#define VSYNC_DDR   DDRD
-#define VSYNC_PINR  PIND
+#define VSYNC 8
+#define VSYNC_PIN     PB0     // aka PCINT0 & ICP1
+#define VSYNC_DDR     DDRB
+#define VSYNC_PINR    PINB
 #define VSYNC_CFG_INPUT() (VSYNC_DDR &= ~_BV(VSYNC_PIN))
 #define VSYNC_READ() (VSYNC_PINR & _BV(VSYNC_PIN))
 
-// set these macros to enable the falling edge interrupt for the 
-// pin select for VSYNC = PD2 = INT0 = PCINT18
-//   - enable the EICRA ints for INT0
-//   - disable the PCMSK for PCINT18
-//
-#define VSYNC_CFG_EICRA()     (EICRA = ((EICRA & 0b11111100) | 0b00000010))
-#define VSYNC_CFG_EIMSK()     (EIMSK |= (1 << INT0))
-#define VSYNC_CFG_PCMSK()     (PCMSK2 &= ~(1 << PCINT18))
-#define VSYNC_ISR()           ISR(INT0_vect)
-
+#define VSYNC_ISR() ISR(TIMER1_CAPT_vect)
 
   // HSYNC
-  //  connected to ICP1 
+  //  connected to digital pin 2 
   //
-#define HSYNC 8
-#define HSYNC_PIN     PB0     // aka PCINT0 & ICP1
-#define HSYNC_DDR     DDRB
-#define HSYNC_PINR    PINB
+#define HSYNC 2
+#define HSYNC_PIN   PD2       // aka PCINT18
+#define HSYNC_DDR   DDRD
+#define HSYNC_PINR  PIND
 #define HSYNC_CFG_INPUT() (HSYNC_DDR &= ~_BV(HSYNC_PIN))
 #define HSYNC_READ() (HSYNC_PINR & _BV(HSYNC_PIN))
-
-
-#define HSYNC_ISR() ISR(TIMER1_CAPT_vect)
 
   // PPS
   //  Connected to edge triggered INT1 = digital pin 3
