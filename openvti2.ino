@@ -140,7 +140,7 @@ volatile int fieldParity = 0;           // 1=> field 1, 2=> field 2  (0 => not y
 volatile int fieldSync = -1;            // > 0 => running check to identify field 1 from HSYNC/VSYNC timing
                                         //   == 0 => field parity is set
                                         // < 0 => no check yet
-
+volatile unsigned long cntParityError;
 
 bool blnPE1 = false;
 bool blnPE2 = false;
@@ -261,6 +261,7 @@ struct {
   bool valid;
   uint8_t usLeapSec;      // current leap seconds
   bool  blnLeapValid;     // true => leap seconds is up to date, false => using firmware default value
+  uint8_t cLeap[3];       // leap seconds field from sentence
 } gpsPUBX04;
 
 
@@ -350,8 +351,9 @@ void setup() {
   TIMSK1 = (1 << TOIE1);                    // enable overflow int only (for now)
   PRR &= ~(1 << PRTIM1);                    // turn on timer 1
   
+
   //*************
-  // setup interrupt sources
+  // setup input sources
   //  * PPS
   //  * VSYNC
   //  * HSYNC
@@ -367,26 +369,18 @@ void setup() {
   
   
   // HSYNC
-  //  connected to Timer1 ICP falling edge (start of horizontal blanking)
-  //  enable Hsync first to generate these times before vsync starts up
+  //  no interrupt - just polled as an input
   //
   fieldSync = -1;                        // not time to sync fields yet...
-  tk_HSYNC = 0;
   HSYNC_CFG_INPUT();
-  TCCR1B &= ~(1 << ICES1);                  // falling edge trigger for HSYNC (start of horizontal blanking)
-  TIMSK1 |= (1 << ICIE1);                   // enable ICP interrupt
-  
-  // wait 1ms before tracking VSYNC to allow at least one HSYNC pulse
-  //
-  delay(1);
-  
-  // VSYNC
+   
+  // VSYNC - setup as falling edge ICP interrupt
   //
   tk_VSYNC = 0;
   VSYNC_CFG_INPUT();
-  VSYNC_CFG_EICRA();
-  VSYNC_CFG_PCMSK();
-  VSYNC_CFG_EIMSK();
+
+  TCCR1B &= ~(1 << ICES1);                  // falling edge trigger for VSYNC (start of horizontal blanking)
+  TIMSK1 |= (1 << ICIE1);                   // enable ICP interrupt
 
   //************************
   // Startup field detection
@@ -394,17 +388,7 @@ void setup() {
   //
   blnPE1 = false;
   blnPE2 = false;
-  fieldSync = 5;       // now look for field 1/ field 2 during VSYNC
-
-  delay(500);                     // wait half a sec (several fields)
-  TIMSK1 &= ~(1 << ICIE1);        // disable ICP interrupt (don't need HSYNC now)
-  if (blnPE1 || blnPE2)
-  {
-      msgErrorCodes[0] = 'e';
-      msgErrorCodes[1] = 'F';   // field parity detect error
-      msgErrorCodes[2] = (blnPE1? '1' : '2');
-  }
-  
+  fieldSync = 1;       // now look for field 1/ field 2 during VSYNC
 
   //*********************
   //  OK, startup the regular cycle 
@@ -442,15 +426,71 @@ VSYNC_ISR()
 {
   volatile int prevParity;
   unsigned long timeDiff;
-  unsigned long timePrev;
   uint8_t utmp;
   unsigned long ulTmp;
 
-  //**************
-  // Get the time of this VSYNC
+  //****************************************
+  //  determine field parity
+  //   wait for falling edge of HSYNC, then get ICR count and compare
+  //   **** This code will hang if no HSYNC! but that is probably ok.  No Hsync => no video signal
   //
-  timePrev = tk_VSYNC;
-  tk_VSYNC = GetTicks(TCNT);
+  
+  // wait until HSYNC high
+  //
+  while( !HSYNC_READ() );
+
+  // then wait for it to fall
+  //
+  while( HSYNC_READ() );
+
+  // now get the current time as the falling edge of HSYNC
+  //
+  tk_HSYNC = GetTicks(TCNT);
+
+  // and get the ICR time for the start of VSYNC
+  //
+  tk_VSYNC = GetTicks(ICR);
+
+  // determine time to nearest HSYNC
+  //   During field 1, HSYNC should occur near VSYNC
+  //
+  if (tk_HSYNC >= tk_VSYNC)
+  {
+    timeDiff = tk_HSYNC - tk_VSYNC;
+  }
+  else
+  {
+    timeDiff = 0 - (tk_VSYNC - tk_HSYNC);
+  }
+
+  if (timeDiff > 128)     // > 64us
+  {
+    timeDiff -= 128;      // modulo 64us
+  }
+  else if (timeDiff > 64)      // 32 - 64 us
+  {
+    timeDiff = 128-timeDiff;
+  }
+
+  // HSYNC within 15us of VSYNC => field 1
+  //
+  prevParity = fieldParity;
+  if (timeDiff < 30)
+  { 
+    fieldParity = 1;
+  }
+  else
+  {
+    fieldParity = 2;
+  }
+
+  // error check
+  //
+  if (prevParity == fieldParity)
+  {
+    cntParityError++;
+    ultohex(TestRow + 5,cntParityError);
+  }
 
   //************************
   // increment field count
@@ -460,75 +500,6 @@ VSYNC_ISR()
   if (fieldCount > FIELDTOT_MAX)
     fieldCount = 0;
 
-  //*******************************************************
-  // determine field parity : field 1 or field 2 of a frame
-  //   * NOTE: fieldSync < 0 => do nothing
-  //   * during startup, check HSYNC timing vs VSYNC to identify field 1
-  //   * after startup, turn off HSYNC ints and alternate fields
-  //
-  if (fieldSync < 0)
-  {
-    fieldParity = -1;
-  }
-  else if (fieldSync == 0)
-  {
-    // after Startup/sync, just alternate fields
-    //
-    if (fieldParity == 1)
-    {
-      fieldParity = 2;
-    }
-    else
-    {
-      fieldParity = 1;
-    }
-  }
-  else
-  {
-    //  decrement count
-    //
-    fieldSync--;
-    
-    // Startup/sync: Field parity detection
-    //    Field 1:
-    //      prev HSYNC (start of blanking) should be "close" to this VSYNC time
-    //        - must check for case where HSYNC happens just AFTER VSYNC (assume 64us period)
-    //
-    if (tk_VSYNC >= tk_HSYNC)
-    {
-      timeDiff = tk_VSYNC - tk_HSYNC;
-    }
-    else
-    {
-      timeDiff = 0 - (tk_HSYNC - tk_VSYNC);
-    }
-  
-    prevParity = fieldParity;
-    if ((timeDiff < 40) || (timeDiff > 100))    // < 20ms or > 50ms
-    {
-      fieldParity = 1;
-    }
-    else
-    {
-      fieldParity = 2;
-    }
-  
-    // check for errors 
-    //
-    if (fieldParity == prevParity)
-    {     
-      // flag it
-      //
-      if (fieldParity == 1)
-      {
-        blnPE1 = true;
-      }
-      else
-      {
-        blnPE2 = true;
-      }
-    }
-  } // end of fieldSync
   
   //****************************
   //  ENABLE interrupts again
@@ -775,6 +746,10 @@ VSYNC_ISR()
           // error codes
           //
           OSD.atomax(TopRow + 7, (uint8_t*) msgErrorCodes, len_msgErrorCodes);
+
+          // leap seconds
+          //
+          OSD.atomax(TopRow + 15, gpsPUBX04.cLeap, 3);
           
           break;
 
@@ -870,40 +845,11 @@ VSYNC_ISR()
 
 #endif
 
-#if 0
+#if 1
   OSD.sendArray(5*30,TestRow,30); // testing...
-#else
-  OSD.setCursor(0,5);
-
-  for(int i=0; i< 30; i++)
-  {
-    OSD.write(TestRow[i]);
-  }
 #endif
 
 } // end of VSYNC_ISR
-
-//===============================
-//  HSYNC ISR
-//===============================
-HSYNC_ISR()
-{
-  unsigned long timeCurrent;
-  unsigned long timePrev;
-  unsigned long timeDiff;
-
-  // get the HSYNC time from the input capture register
-  //   falling edge => start of Horizontal blanking
-  //
-  timeCurrent = GetTicks(ICR);
-
-  // 
-  //
-  timePrev = tk_HSYNC;
-  tk_HSYNC = timeCurrent;
-
-
-} // end of HSYNC_ISR
 
 //===============================
 //  PPS ISR
@@ -2030,6 +1976,8 @@ bool ParsePUBX04()
   {
     return false; 
   }
+  gpsPUBX04.cLeap[0] = nmeaSentence[iStart];
+  gpsPUBX04.cLeap[1] = nmeaSentence[iStart+1];
 
   // decode the two digit leap second count
   //
@@ -2047,6 +1995,7 @@ bool ParsePUBX04()
     // no terminating 'D' => alamanac is up to date and time is UTC
     //
     gpsPUBX04.blnLeapValid = true;
+    gpsPUBX04.cLeap[2] = 0x20;        // space at end
   }
   else
   {
@@ -2055,6 +2004,7 @@ bool ParsePUBX04()
     if (nmeaSentence[iStart + 2] == 'D')
     {
       gpsPUBX04.blnLeapValid = false;
+      gpsPUBX04.cLeap[2] = 0x44;        // 'D'
     }
     else
     {
