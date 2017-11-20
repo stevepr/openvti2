@@ -300,7 +300,7 @@ void setup() {
   gpsInitStatus = gpsInit();
 
   //************
-  //  Init max7456 OSD chip
+  //  Init max OSD chip
   //
   
   // Initialize the SPI connection:
@@ -437,74 +437,85 @@ void loop() {
 //===============================
 VSYNC_ISR()
 {
-  volatile int prevParity;
   unsigned long timeDiff;
   uint8_t utmp;
   unsigned long ulTmp;
 
   //****************************************
   //  determine field parity
-  //   wait for falling edge of HSYNC, then get ICR count and compare
-  //   **** This code will hang if no HSYNC! but that is probably ok.  No Hsync => no video signal
+  //  after startup
+  //    just swap back and forth
+  //  during startup
+  //    wait for falling edge of HSYNC, then get ICR count and compare
+  //    **** This code will hang if no HSYNC! but that is probably ok.  No Hsync => no video signal
   //
+  if (fieldParity != 0)
+  {
+    // after startup
+    //
+    
+    // get the ICR time for the start of VSYNC
+    //
+    tk_VSYNC = GetTicks(ICR);
+
+    // just set the parity based on last field
+    //
+    fieldParity = (fieldParity == 1)? 2 : 1;
+    
+  }
+  else
+  {
+    // startup - detect the parity based on VSYNC/HSYNC timing
+    //
+    // wait until HSYNC high
+    //
+    while( !HSYNC_READ() );
   
-  // wait until HSYNC high
-  //
-  while( !HSYNC_READ() );
-
-  // then wait for it to fall
-  //
-  while( HSYNC_READ() );
-
-  // now get the current time as the falling edge of HSYNC
-  //
-  tk_HSYNC = GetTicks(TCNT);
-
-  // and get the ICR time for the start of VSYNC
-  //
-  tk_VSYNC = GetTicks(ICR);
-
-  // determine time to nearest HSYNC
-  //   During field 1, HSYNC should occur near VSYNC
-  //
-  if (tk_HSYNC >= tk_VSYNC)
-  {
-    timeDiff = tk_HSYNC - tk_VSYNC;
-  }
-  else
-  {
-    timeDiff = 0 - (tk_VSYNC - tk_HSYNC);
-  }
-
-  if (timeDiff > 128)     // > 64us
-  {
-    timeDiff -= 128;      // modulo 64us
-  }
-  else if (timeDiff > 64)      // 32 - 64 us
-  {
-    timeDiff = 128-timeDiff;
-  }
-
-  // HSYNC within 15us of VSYNC => field 1
-  //
-  prevParity = fieldParity;
-  if (timeDiff < 30)
-  { 
-    fieldParity = 1;
-  }
-  else
-  {
-    fieldParity = 2;
-  }
-
-  // error check
-  //
-  if (prevParity == fieldParity)
-  {
-    cntParityError++;
-    msgErrorCodes[0] = 'E';     // error present
-    msgErrorCodes[1] = 'f';     // flag for field parity error detected
-  }
+    // then wait for it to fall
+    //
+    while( HSYNC_READ() );
+  
+    // now get the current time as the falling edge of HSYNC
+    //
+    tk_HSYNC = GetTicks(TCNT);
+  
+    // and get the ICR time for the start of VSYNC
+    //
+    tk_VSYNC = GetTicks(ICR);
+  
+    // determine time to nearest HSYNC
+    //   During field 1, HSYNC should occur near VSYNC
+    //
+    if (tk_HSYNC >= tk_VSYNC)
+    {
+      timeDiff = tk_HSYNC - tk_VSYNC;
+    }
+    else
+    {
+      timeDiff = 0 - (tk_VSYNC - tk_HSYNC);
+    }
+  
+    if (timeDiff > 128)     // > 64us
+    {
+      timeDiff -= 128;      // modulo 64us
+    }
+    else if (timeDiff > 64)      // 32 - 64 us
+    {
+      timeDiff = 128-timeDiff;
+    }
+  
+    // HSYNC within 15us of VSYNC => field 1
+    //
+    if (timeDiff < 30)
+    { 
+      fieldParity = 1;
+    }
+    else
+    {
+      fieldParity = 2;
+    }
+    
+  } // end of fieldParity detection
 
   //************************
   // increment field count
