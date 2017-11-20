@@ -118,6 +118,8 @@ uint8_t TestRow[30];
 #define FIELDTOT_ROW BOTTOM_ROW
 #define FIELDTOT_MAX 9999999        // max field count (row is only 29 char wide reliably)
 
+uint8_t videoStd;     // NTSC or PAL setting
+
 int osdTop_RowOffset = TOP_ROW_NTSC*30;   // display memory offset to start of ROW for cycling through data
 int osdTop_Col = 1;                       // starting colum in this ROW
 
@@ -258,7 +260,6 @@ struct {
 void setup() {
   uint8_t rows;
   uint8_t cols;    
-  uint8_t videoStd;
   
   //**************
   //  check startup mode
@@ -287,15 +288,19 @@ void setup() {
     BottomRow[i] = 0x00;
   }
 
+  //*****************
+  //  Delay to allow startup time for external devices
+  //   max7456 typically needs 50ms
+  //
+  delay(100);     // 100 ms to make sure
+  
   //************
   // Init GPS
   //
-  delay(50);        // wait a bit
   gpsInitStatus = gpsInit();
 
-
   //************
-  //  Init OSD
+  //  Init max7456 OSD chip
   //
   
   // Initialize the SPI connection:
@@ -341,7 +346,6 @@ void setup() {
   }
   
   OSD.setTextArea(rows, cols, MAX7456_FULLSCREEN);
-  //OSD.setSyncSource(MAX7456_EXTSYNC);
   OSD.setSyncSource(MAX7456_AUTOSYNC);
   OSD.setWhiteLevel(0);  // should be 0% black 120% white
   OSD.setCharEncoding(MAX7456_ASCII);       // use this char set
@@ -350,10 +354,6 @@ void setup() {
   OSD.setTextOffset(OSD_X_OFFSET, OSD_Y_OFFSET);
   
   OSD.display();                              // Activate the text display.
-
-  //
-  // wait for VSYNC to start
-  while (OSD.notInVSync());                   // Wait for VSync to start 
 
   //*************************
   //  setup Timer 1 first
