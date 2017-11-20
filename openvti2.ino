@@ -91,14 +91,15 @@ uint16_t TopRow_Addr = 30;            // Top Row is row 1
 uint8_t BottomRow[30];
 uint16_t BottomRow_Addr = 9 * 30;    // Top Row is row 11 (good for NTSC)
 
-#if 1
+#if 0
 uint8_t TestRow[30];
 #endif
 
 // location of UI elements
-#define TOP_ROW 11
-#define BOTTOM_ROW  12
-//#define BOTTOM_ROW  11      // ***for testing
+#define TOP_ROW_NTSC 11
+#define BOTTOM_ROW_NTSC  12
+#define TOP_ROW_PAL 14
+#define BOTTOM_ROW_PAL 15
 
 // solid character that blinks each PPS we receive
 #define PPSCHAR_COL 1
@@ -117,13 +118,10 @@ uint8_t TestRow[30];
 #define FIELDTOT_ROW BOTTOM_ROW
 #define FIELDTOT_MAX 9999999        // max field count (row is only 29 char wide reliably)
 
-#define FIX_ROW TOP_ROW
-#define FIX_COL 1
+int osdTop_RowOffset = TOP_ROW_NTSC*30;   // display memory offset to start of ROW for cycling through data
+int osdTop_Col = 1;                       // starting colum in this ROW
 
-int osdTop_RowOffset = TOP_ROW*30;    // display memory offset to start of ROW for cycling through data
-int osdTop_Col = 1;                   // starting colum in this ROW
-
-int osdBottom_RowOffset = BOTTOM_ROW*30;     // display memory offset to start of ROW for time data
+int osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;   // display memory offset to start of ROW for time data
 int osdBottom_Col = 1;
 
 // pixel offset of display    
@@ -137,23 +135,12 @@ volatile bool EnableOverlay = false;
 volatile unsigned long fieldCount;
 
 volatile int fieldParity = 0;           // 1=> field 1, 2=> field 2  (0 => not yet set)
-volatile int fieldSync = -1;            // > 0 => running check to identify field 1 from HSYNC/VSYNC timing
-                                        //   == 0 => field parity is set
-                                        // < 0 => no check yet
 volatile unsigned long cntParityError;
-
-bool blnPE1 = false;
-bool blnPE2 = false;
 
 volatile unsigned long tk_VSYNC;      // vsync "time" = 2mhz ticks
 volatile unsigned long tk_HSYNC;      // hsync "time" = 2mhz ticks
 
 volatile unsigned short osdRotation = 0;             // rotation counter for top row
-
-#if 1
-volatile unsigned long saMin=0xFFFFFFFF;
-volatile unsigned long saMax=0x00;
-#endif
 
 //***********************
 //  Time
@@ -269,7 +256,10 @@ struct {
 //  SETUP ROUTINE
 //========================================
 void setup() {
-
+  uint8_t rows;
+  uint8_t cols;    
+  uint8_t videoStd;
+  
   //**************
   //  check startup mode
   //
@@ -315,10 +305,41 @@ void setup() {
   
   // Initialize the MAX7456 OSD:
   //
-  uint8_t rows = OSD.safeVideoRows[MAX7456_NTSC][MAX7456_FULLSCREEN];
-  uint8_t cols = OSD.safeVideoCols[MAX7456_NTSC][MAX7456_FULLSCREEN];    
   OSD.begin();                // Use NTSC with full area.
-  OSD.setDefaultSystem(MAX7456_NTSC) ;
+
+  // NTSC or PAL?
+  //
+  videoStd = 0;
+  while (videoStd == 0)
+  {
+    videoStd = OSD.videoSystem();
+    delay(100);
+  }
+
+  if ( videoStd == MAX7456_NTSC )
+  {
+    rows = OSD.safeVideoRows[MAX7456_NTSC][MAX7456_FULLSCREEN];
+    cols = OSD.safeVideoCols[MAX7456_NTSC][MAX7456_FULLSCREEN];    
+    OSD.setDefaultSystem(MAX7456_NTSC);
+    
+    osdTop_RowOffset = TOP_ROW_NTSC*30;    
+    osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
+  }
+  else if (videoStd == MAX7456_PAL)
+  {
+    rows = OSD.safeVideoRows[MAX7456_PAL][MAX7456_FULLSCREEN];
+    cols = OSD.safeVideoCols[MAX7456_PAL][MAX7456_FULLSCREEN];    
+    OSD.setDefaultSystem(MAX7456_PAL);
+    
+    osdTop_RowOffset = TOP_ROW_PAL*30;
+    osdBottom_RowOffset = BOTTOM_ROW_PAL*30;
+  }
+  else
+  {
+    EnableOverlay = false;
+    return;      // unknown video standard... do nothing
+  }
+  
   OSD.setTextArea(rows, cols, MAX7456_FULLSCREEN);
   //OSD.setSyncSource(MAX7456_EXTSYNC);
   OSD.setSyncSource(MAX7456_AUTOSYNC);
@@ -332,7 +353,7 @@ void setup() {
 
   //
   // wait for VSYNC to start
-  while (OSD.notInVSync());                   // Wait for VSync to start
+  while (OSD.notInVSync());                   // Wait for VSync to start 
 
   //*************************
   //  setup Timer 1 first
@@ -371,7 +392,6 @@ void setup() {
   // HSYNC
   //  no interrupt - just polled as an input
   //
-  fieldSync = -1;                        // not time to sync fields yet...
   HSYNC_CFG_INPUT();
    
   // VSYNC - setup as falling edge ICP interrupt
@@ -381,14 +401,6 @@ void setup() {
 
   TCCR1B &= ~(1 << ICES1);                  // falling edge trigger for VSYNC (start of horizontal blanking)
   TIMSK1 |= (1 << ICIE1);                   // enable ICP interrupt
-
-  //************************
-  // Startup field detection
-  //
-  //
-  blnPE1 = false;
-  blnPE2 = false;
-  fieldSync = 1;       // now look for field 1/ field 2 during VSYNC
 
   //*********************
   //  OK, startup the regular cycle 
@@ -407,6 +419,7 @@ void loop() {
 
   while (true)
   {
+
     // get & parse serial data from GPS
     //
 
@@ -489,7 +502,8 @@ VSYNC_ISR()
   if (prevParity == fieldParity)
   {
     cntParityError++;
-    ultohex(TestRow + 5,cntParityError);
+    msgErrorCodes[0] = 'E';     // error present
+    msgErrorCodes[1] = 'f';     // flag for field parity error detected
   }
 
   //************************
@@ -817,35 +831,6 @@ VSYNC_ISR()
   OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
 
 #if 0
-  // get vsync ISR delay to here
-  //
-  utmp = SREG;
-  noInterrupts();   // protect the count
-  timeDiff = GetTicks(TCNT);
-  SREG = utmp;
-  
-  if (timeDiff > tk_VSYNC)
-  {
-    timeDiff -= tk_VSYNC;
-  }
-  else
-  {
-    timeDiff = 0 - (tk_VSYNC - timeDiff);
-  }
-  if (timeDiff > saMax)
-  {
-    saMax = timeDiff;
-  }
-  if (timeDiff < saMin)
-  {
-    saMin = timeDiff;
-  }
-  ultodec(TestRow+10,saMin,0);
-  ultodec(TestRow+20,saMax,0);
-
-#endif
-
-#if 1
   OSD.sendArray(5*30,TestRow,30); // testing...
 #endif
 

@@ -995,11 +995,11 @@
     uint8_t ubShift  = 0;
     
     ubSystem = receive( MAX7456_STAT_R );       // Get status register value.
-    if (ubSystem & 1 << MAX7456_STAT_NTSC)
+    if (ubSystem & (1 << MAX7456_STAT_NTSC))
     {
       return MAX7456_NTSC;
     }
-    if (ubSystem & 1 << MAX7456_STAT_PAL)
+    if (ubSystem & (1 << MAX7456_STAT_PAL))
     {
       return MAX7456_PAL;
     }
