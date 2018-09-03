@@ -713,7 +713,7 @@ VSYNC_ISR()
       //    Date DD-MM-YY
       //    Lat/Long
       //    MSL/N/Datum
-      //    Version
+      //    Version/UTC offset
       //
       switch (osdRotation)
       {

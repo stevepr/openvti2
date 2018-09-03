@@ -35,8 +35,8 @@
   const byte osdReset                  =            0;
 
   //  **********  need to solder connections for ~VSYNC and ~HSYNC
-  //  Max7456 VSYNC [~VSYNC]         ---> Arduino   2   [INT0, PCINT18, PD2]
-  //  Max7456 HSYNC [~HSYNC]         ---> Arduino   8   [PCINT0, PB0, ICP1]
+  //  Max7456 VSYNC [~VSYNC]         ---> Arduino   8   [INT0, PCINT18, PD2]
+  //  Max7456 HSYNC [~HSYNC]         ---> Arduino   2   [PCINT0, PB0, ICP1]
   //  Max7456 LOS   [LOS]             -X-
 
   // GPS mapping
