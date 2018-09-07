@@ -206,14 +206,17 @@ volatile short int TimeSync;          // ( > 0 ) => we are syncing to GPS senten
 
 // YY-MM-DD HH:MM:SS time of current second
 //   note: all values are less than 255 => don't need to protect individual changes from interrupts during read/write
-//         values are only changed during PPS interrupt, so we will have no issue from interrupting multiple changes
+//         HOWEVER ... the VSYNC ISR uses these values, so we should only update the groups of these variables with interrupts OFF
 //
-volatile int sec_Year;                 // 2 digit
+volatile bool time_UTC = false;         // true => time is currently UTC , false => time is currently GPS
+volatile int sec_Year;                  // 2 digit
 volatile int sec_Mon;
 volatile int sec_Day;
 volatile int sec_hh;
 volatile int sec_mm;
 volatile int sec_ss;
+volatile int offsetUTC_Default = -1;      // receiver default value for GPS-UTC offset
+volatile int offsetUTC_Current = -1;      // current/valid GPS-UTC offset
 
 //******************
 // GPS info
@@ -226,7 +229,6 @@ const unsigned long gpsBaud = 9600;
 volatile unsigned long tk_PPS;        // tick "time" of most recent PPS int
 volatile bool pps_now = false;        // true => PPS just happened
                                       
-volatile bool time_UTC = false;       // true => time is currently UTC , false => time is currently GPS
 
 volatile int pps_HH;                  //  current pps time (HH:MM:SS)
 volatile int pps_MM;
@@ -244,6 +246,8 @@ int nmeaCount = -1;                   // position of next char in NMEA sentence 
 int fieldStart[MAX_FIELDS];   // start position of each field
                               // end of field = (start of next field - 2)                         
 
+volatile unsigned long tk_GPSRMC;   // time (ticks) for start of current RMC data (if valid)
+volatile unsigned long tk_PUBX04;   // time of start of current PUBX04 data (if valid)
 
 volatile struct {
   bool valid;
@@ -345,6 +349,8 @@ void setup() {
     OSD.atomax(&BottomRow[1],(uint8_t*)msgGPSfail,len_msgGPSfail);
     bytetodec2(&BottomRow[1 + len_msgGPSfail + 1],gpsInitStatus);
   }
+
+  
 
   //************
   //  Init max OSD chip
@@ -1060,6 +1066,8 @@ PPS_ISR()
   }
   else if ( CurrentMode == TimeValid )
   {
+    int ErrorFound;
+    
     // TimeValid Mode
     //
     
@@ -1082,8 +1090,88 @@ PPS_ISR()
         time_UTC = true;      // UTC now
       }
     }
+
+    // if we have valid RMC data, check it against our internal time
+    //  if mismatch => error
+    //
+    ErrorFound = 0;
+    if ((gpsRMC.valid)&& ((gpsRMC.mode != 'A') || (gpsRMC.mode != 'D')) )
+    {
+      // now checking timing of this RMC sentence... it must have arrived within one second of this pps
+      //
+      if (timeCurrent > tk_GPSRMC)
+      {
+        timeDiff = timeCurrent - tk_GPSRMC;
+      }
+      else
+      {
+        timeDiff = 0 - (tk_GPSRMC - timeCurrent);
+      }
+      
+      if (timeDiff < Timer_Second)
+      {
+        long internalSec;
+        long rmcSec;
+        
+        // ok, this RMC arrived recently... check the RMC time against internal time
+        //   but keep in mind GPS-UTC offset...
+        //
+        internalSec = sec_hh*3600 + sec_mm*60 + sec_ss;
+        
+        if (!time_UTC)
+        {
+          // internal time is GPS
+          //  ... assume RMC is based on default UTC offset and compute GPS time from RMC
+          //
+          rmcSec = gpsRMC.hh*3600 + gpsRMC.mm * 60 + gpsRMC.ss;
+          rmcSec += offsetUTC_Default;                            // move to GPS time
+          if (rmcSec != internalSec)
+          {
+            ErrorFound = 10;
+          }
+        }
+        else
+        {
+          // internal time is UTC
+          //   RMC could be using either default UTC offset or "true" UTC offset
+          //
+          rmcSec = gpsRMC.hh*3600 + gpsRMC.mm * 60 + gpsRMC.ss;
+          if (rmcSec != internalSec)
+          {
+            // true offset didn't work, try the default offset
+            //
+            rmcSec -= (offsetUTC_Current - offsetUTC_Default);
+            if (rmcSec != internalSec)
+            {
+              ErrorFound = 11;
+            }
+          }
+         
+        }
+        
+      } // end of check for timing of RMC
+      
+    } // end of gpsRMC valid check
+
+    // Did we find an error?
+    //
+    if (ErrorFound > 0)
+    {
+      CurrentMode = ErrorMode;
+      ErrorCountdown = ERROR_DISPLAY_SECONDS;
+      
+      // Error message
+      //
+      for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
+      {
+        BottomRow[i] = 0x00;
+      }   
+      OSD.atomax(&BottomRow[1],(uint8_t*)msgNoPPS,len_msgSyncFailed);
+      bytetodec2(BottomRow + len_msgNoPPS + 2,(byte)ErrorFound);
+      return;
+    }
     
-    // increment the time by one second for this PPS
+    // NOW increment the time by one second for this PPS
     //
     SecInc();
     
@@ -1105,10 +1193,12 @@ PPS_ISR()
     {
       // RMC time should correspond to the PREVIOUS second
       //
+      noInterrupts();       // update hh:mm:ss as one operation
       sec_ss = gpsRMC.ss;
       sec_mm = gpsRMC.mm;
       sec_hh = gpsRMC.hh;
       SecInc();               // bump the count by one to match the second for THIS PPS signal    
+      interrupts();
     }
 
     // GPS data looks good => move to Syncing mode (we will check the next five seconds for consistency)
@@ -1137,23 +1227,76 @@ PPS_ISR()
     // validation 1 : was last PPS about one second away?  we checked this earlier
     //
 
-    // validation 2 : check the time stamp
-    //   we have not yet incremented the time, so it should match the current NMEA value
-    //   
+    // validation 2: gpsRMC, PUBX04 good?
     //
     if ((!gpsRMC.valid) || (!gpsPUBX04.valid))
     {
       ErrorFound = 1;
     }
-    else if ((gpsRMC.hh != sec_hh) || (gpsRMC.mm != sec_mm) || (gpsRMC.ss != sec_ss))
-    {
-      ErrorFound = 2;
-    }
     else if ((gpsRMC.mode != 'A') && (gpsRMC.mode != 'D'))
     {
       ErrorFound = 3;
     }
+    else
+    {
+      // compare time of RMC, PUBX04 vs time of PPS
+      //
+      if (timeCurrent > tk_GPSRMC)
+      {
+        timeDiff = timeCurrent - tk_GPSRMC;
+      }
+      else
+      {
+        timeDiff = 0 - (tk_GPSRMC - timeCurrent);
+      }
+      
+      if (timeDiff > Timer_Second)
+      {
+        // oops... this RMC was sent MORE than one second befor this PPS
+        ErrorFound = 4;
+      }
+      else
+      {
+        if (timeCurrent > tk_PUBX04)
+        {
+          timeDiff = timeCurrent - tk_PUBX04;
+        }
+        else
+        {
+          timeDiff = 0 - (tk_PUBX04 - timeCurrent);
+        }
+        
+        if (timeDiff > Timer_Second)
+        {
+          // oops... this RMC was sent MORE than one second befor this PPS
+          ErrorFound = 5;
+        }
+        
+      } // end of PUBX04 check 
 
+      // ok... both RMC and PUBX04 look good
+      
+    } // end of checking timing to RMC/PUBX sentence
+    
+    
+    // validation 3 : check the time stamp
+    //   we have not yet incremented the time, so it should match the current NMEA value
+    //   * note... if UTC offset updates in this timeframe it will break the sync ... but that is OK... it just restarts...
+    //
+    if (ErrorFound == 0)
+    {
+      noInterrupts();     // protect hh:mm:ss check
+      if ((gpsRMC.hh != sec_hh) || (gpsRMC.mm != sec_mm) || (gpsRMC.ss != sec_ss))
+      {
+        ErrorFound = 2;
+      }
+      else if ((gpsRMC.mode != 'A') && (gpsRMC.mode != 'D'))
+      {
+        ErrorFound = 3;
+      }
+      interrupts();          
+    }
+    
     // if error, report it and return
     //
     if (ErrorFound > 0)
@@ -1170,7 +1313,7 @@ PPS_ISR()
         BottomRow[i] = 0x00;
       }   
       OSD.atomax(&BottomRow[1],(uint8_t*)msgSyncFailed,len_msgSyncFailed);
-      bytetodec2(BottomRow + len_msgNoPPS + 2,(byte)ErrorFound + 3);
+      bytetodec2(BottomRow + len_msgSyncFailed + 2,(byte)ErrorFound + 3);
       return;
     }
     
@@ -1187,16 +1330,17 @@ PPS_ISR()
     //
     if (TimeSync == 0)
     {
-      // Set time according to most recent PPS and Leap Second status
+      // Set internal time according to most recent PPS and Leap Second status
       //
 
       // RMC time should correspond to the PREVIOUS second
       //
+      noInterrupts();       // protect internal time update ...
       sec_ss = gpsRMC.ss;
       sec_mm = gpsRMC.mm;
       sec_hh = gpsRMC.hh;
       SecInc();               // bump the count by one to match the second for THIS PPS signal
-
+      
       // check for leap second status of the time from RMC
       //
       if (gpsPUBX04.blnLeapValid)
@@ -1216,6 +1360,7 @@ PPS_ISR()
         }
         
       } // end of check for leap second status
+      interrupts();
 
       // We now have a valid time base... 
       //
@@ -1640,14 +1785,28 @@ bool ubxGetAck(uint8_t *MSG)
 // NEO 6 GPS serial data parsing
 //**********************************************************************************************************
 
+// NMEA return codes
+//
+#define NMEA_ERROR    0
+#define NMEA_UNKNOWN  1
+#define NMEA_RMC      2
+#define NMEA_GGA      3
+#define NMEA_DTM      4
+#define NMEA_PUBX04   5
+
 //=============================================================
 //  ReadGPS - gather and parse any pending serial data from GPS
 //    returns false if error parsing data
 //=============================================================
 bool ReadGPS()
 {
-
+  int n_hh;
+  int n_mm;
+  int n_ss;
+  bool n_blnUTC;
   char c;
+  unsigned long tk_Start;
+  int resultParse;
 
   //************
   // Read/process all currently available characters
@@ -1667,7 +1826,18 @@ bool ReadGPS()
     {
       // start of a sentence
       //
-
+      noInterrupts();
+      tk_Start = GetTicks(TCNT);
+      interrupts();
+      // save the current hh:mm:ss time
+      //
+      noInterrupts();
+      n_blnUTC = time_UTC;
+      n_hh = sec_hh;
+      n_mm = sec_mm;
+      n_ss = sec_ss;
+      interrupts();
+      
       // are we in the right place?
       //
       if (nmeaCount > 0)
@@ -1718,17 +1888,39 @@ bool ReadGPS()
 
         // call the parser
         //
-        if (!ParseNMEA())
+        resultParse = ParseNMEA();
+        if (resultParse == NMEA_ERROR)
         {
           nmeaCount = 0;   // restart
           return false;   // exit on parsing error
         }
-        
+
+        // save time of RMC and PUBX04 sentences
+        //
+        if (resultParse == NMEA_RMC)
+        {
+          tk_GPSRMC = tk_Start;
+        }
+        else if (resultParse == NMEA_PUBX04)
+        {
+          tk_PUBX04 = tk_Start;     // save start time
+
+          // update current or default GPS-UTC offset value
+          //
+          if (gpsPUBX04.blnLeapValid)
+          {
+            offsetUTC_Current = gpsPUBX04.usLeapSec;
+          }
+          else
+          {
+            offsetUTC_Default = gpsPUBX04.usLeapSec;
+          }
+        }
         // looking for new sentence now...
         //
         nmeaCount = 0;
        
-      }
+      } // found the end of a sentence
       
     }  // end of check for start/non-start char
     
@@ -1745,7 +1937,7 @@ bool ReadGPS()
 //    nmeaSentence[] - array of chars containing sentence
 //    nmeaCount = # of chars in sentence (including terminating CRLF)
 //=============================================================
-bool ParseNMEA()
+int ParseNMEA()
 {
   int iField;       // current field #
   int fieldCount;   // # of fields in sentence (including CRLF)
@@ -1773,7 +1965,7 @@ bool ParseNMEA()
       iPos++;             // start with position past ','
       if (iPos >= nmeaCount)
       {
-        return false;     // no start of next field => unexpected end of sentence
+        return NMEA_ERROR;     // no start of next field => unexpected end of sentence
       }
       fieldStart[iField] = iPos;
 
@@ -1801,12 +1993,12 @@ bool ParseNMEA()
   //
   if ((char)nmeaSentence[iPos] != '\n')
   {
-    return false;       // terminated loop without finding CRLF
+    return NMEA_ERROR;       // terminated loop without finding CRLF
   }
   fieldCount = iField + 1;
   if (fieldCount < 3)
   {
-    return false;     // all sentences have at least three fields
+    return NMEA_ERROR;     // all sentences have at least three fields
   }
   
   //************
@@ -1824,7 +2016,7 @@ bool ParseNMEA()
     if (fLen < 6)
     {
       // unknown message - just return no error for now
-      return true;
+      return NMEA_UNKNOWN;
     }
     
     if ( ((char)nmeaSentence[fStart+3] == 'R') &&
@@ -1843,11 +2035,11 @@ bool ParseNMEA()
           ((char)nmeaSentence[fStart+4] == 'T') &&
           ((char)nmeaSentence[fStart+5] == 'M') )
     {
-      return true;
+      return NMEA_DTM;
     }
     else
     {
-        return true;
+        return NMEA_UNKNOWN;
     } // end of if/else block parsing standard NMEA sentences
   }
   else if ( ((char)nmeaSentence[fStart] == '$') &&
@@ -1872,7 +2064,7 @@ bool ParseNMEA()
     {
       // unknown PUBX sentence => do nothing
       //
-      return true;
+      return NMEA_UNKNOWN;
       
     }// end of check for PUBX sentence type
   }
@@ -1881,7 +2073,7 @@ bool ParseNMEA()
     // unknown sentence type
     //
     //  DO NOTHING and no error
-    return true;
+    return NMEA_UNKNOWN;
   }
   
 } // end of ParseNMEA
@@ -1893,7 +2085,7 @@ bool ParseNMEA()
 //    fieldStart[] - array of starting indicies for fields
 //    fieldCount = # of fields (including CRLF)
 //=============================================================
-bool ParseGGA(int fieldCount)
+int ParseGGA(int fieldCount)
 {
   int iStart;
   int iLen;
@@ -1906,7 +2098,7 @@ bool ParseGGA(int fieldCount)
   //
   if (fieldCount < 17)
   {
-    return false;
+    return NMEA_ERROR;
   }
 #endif
 
@@ -1918,7 +2110,7 @@ bool ParseGGA(int fieldCount)
 
   if ((iLen < 5) || (iLen > MAX_LATLONG))
   {
-    return false; 
+    return NMEA_ERROR; 
   }
 
   for( int i = 0; i < MAX_LATLONG; i++ )
@@ -1941,13 +2133,13 @@ bool ParseGGA(int fieldCount)
 
   if (iLen < 1)
   {
-    return false; 
+    return NMEA_ERROR; 
   }
   gpsGGA.NS = (char)nmeaSentence[iStart];  
   if ( ((char)gpsGGA.NS != 'N') && ((char)gpsGGA.NS != 'n') && 
           ((char)gpsGGA.NS != 'S') && ((char)gpsGGA.NS != 's') )
   {
-    return false;
+    return NMEA_ERROR;
   }
 
   //******************************
@@ -1958,7 +2150,7 @@ bool ParseGGA(int fieldCount)
 
   if ((iLen < 5) || (iLen > MAX_LATLONG))
   {
-    return false; 
+    return NMEA_ERROR; 
   }
 
   for( int i = 0; i < MAX_LATLONG; i++ )
@@ -1981,13 +2173,13 @@ bool ParseGGA(int fieldCount)
 
   if (iLen < 1)
   {
-    return false; 
+    return NMEA_ERROR; 
   }
   gpsGGA.EW = (char)nmeaSentence[iStart];
   if ( ((char)gpsGGA.EW != 'E') && ((char)gpsGGA.EW != 'e') && 
           ((char)gpsGGA.EW != 'W') && ((char)gpsGGA.EW != 'w') )
   {
-    return false;
+    return NMEA_ERROR;
   }
 
   //******************************
@@ -1998,7 +2190,7 @@ bool ParseGGA(int fieldCount)
 
   if ((iLen < 1) || (iLen > MAX_ALT))
   {
-    return false; 
+    return NMEA_ERROR; 
   }
 
   for( int i = 0; i < MAX_ALT; i++ )
@@ -2021,12 +2213,12 @@ bool ParseGGA(int fieldCount)
 
   if (iLen < 1)
   {
-    return false; 
+    return NMEA_ERROR; 
   }
   gpsGGA.alt_units = (char)nmeaSentence[iStart];
   if ((gpsGGA.alt_units != 'M') && (gpsGGA.alt_units != 'm'))      // must be "m"
   {
-    return false;
+    return NMEA_ERROR;
   }
 
   //******************************
@@ -2037,7 +2229,7 @@ bool ParseGGA(int fieldCount)
 
   if ((iLen < 1) || (iLen > MAX_ALT))
   {
-    return false; 
+    return NMEA_ERROR; 
   }
 
   for( int i = 0; i < MAX_ALT; i++ )
@@ -2060,12 +2252,12 @@ bool ParseGGA(int fieldCount)
 
   if (iLen < 1)
   {
-    return false; 
+    return NMEA_ERROR; 
   }
   gpsGGA.sep_units = (char)nmeaSentence[iStart];
   if ((gpsGGA.sep_units != 'M') && (gpsGGA.sep_units != 'm'))      // must be "m"
   {
-    return false;
+    return NMEA_ERROR;
   }
   
   //**********
@@ -2073,7 +2265,7 @@ bool ParseGGA(int fieldCount)
   //
   gpsGGA.valid = true;
   
-  return true;
+  return NMEA_GGA;
   
 } // end of parseGGA
 
@@ -2084,7 +2276,7 @@ bool ParseGGA(int fieldCount)
 //    fieldStart[] - array of starting indicies for fields
 //    fieldCount = # of fields (including CRLF)
 //=============================================================
-bool ParseRMC(int fieldCount)
+int ParseRMC(int fieldCount)
 {
   int iStart;
   int iLen;
@@ -2096,7 +2288,7 @@ bool ParseRMC(int fieldCount)
   //
   if (fieldCount < 14)
   {
-    return false;
+    return NMEA_ERROR;
   }
 #endif
 
@@ -2108,7 +2300,7 @@ bool ParseRMC(int fieldCount)
 
   if (iLen < 6)
   {
-    return false; 
+    return NMEA_ERROR; 
   }
 
   //*** protect from interrupts ***
@@ -2120,19 +2312,19 @@ bool ParseRMC(int fieldCount)
   if (gpsRMC.hh < 0)
   {
     gpsRMC.valid = false;
-    return false;
+    return NMEA_ERROR;
   }
   gpsRMC.mm = d2i( &nmeaSentence[iStart+2]);
   if (gpsRMC.mm < 0)
   {
     gpsRMC.valid = false;
-    return false;
+    return NMEA_ERROR;
   }
   gpsRMC.ss = d2i( &nmeaSentence[iStart+4]);
   if (gpsRMC.ss < 0)
   {
     gpsRMC.valid = false;
-    return false;
+    return NMEA_ERROR;
   }
   interrupts();
   
@@ -2144,26 +2336,26 @@ bool ParseRMC(int fieldCount)
 
   if (iLen < 6)
   {
-    return false; 
+    return NMEA_ERROR; 
   }
   
   gpsRMC.day = d2i( &nmeaSentence[iStart]);
   if (gpsRMC.day < 0)
   {
     gpsRMC.valid = false;
-    return false;
+    return NMEA_ERROR;
   }
   gpsRMC.mon = d2i( &nmeaSentence[iStart+2]);
   if (gpsRMC.mon < 0)
   {
     gpsRMC.valid = false;
-    return false;
+    return NMEA_ERROR;
   }
   gpsRMC.yr = d2i( &nmeaSentence[iStart+4]);
   if (gpsRMC.yr < 0)
   {
     gpsRMC.valid = false;
-    return false;
+    return NMEA_ERROR;
   }
 
   //**************
@@ -2174,7 +2366,7 @@ bool ParseRMC(int fieldCount)
 
   if (iLen < 1)
   {
-    return false; 
+    return NMEA_ERROR; 
   }
   gpsRMC.mode = (char)nmeaSentence[iStart];     // mode char
   
@@ -2183,7 +2375,7 @@ bool ParseRMC(int fieldCount)
   //
   gpsRMC.valid = true;
   
-  return true;
+  return NMEA_RMC;
   
 } // end of parseRMC
 
@@ -2194,7 +2386,7 @@ bool ParseRMC(int fieldCount)
 //    fieldStart[] - array of starting indicies for fields
 //    fieldCount = # of fields (including CRLF)
 //=============================================================
-bool ParsePUBX04(int fieldCount)
+int ParsePUBX04(int fieldCount)
 {
   int iStart;
   int iLen;
@@ -2207,7 +2399,7 @@ bool ParsePUBX04(int fieldCount)
   //
   if (fieldCount < 12)
   {
-    return false;
+    return NMEA_ERROR;
   }
 #endif
   
@@ -2221,7 +2413,7 @@ bool ParsePUBX04(int fieldCount)
   //
   if ((iLen < 2) || (iLen > 3))
   {
-    return false; 
+    return NMEA_ERROR; 
   }
   gpsPUBX04.cLeap[0] = nmeaSentence[iStart];
   gpsPUBX04.cLeap[1] = nmeaSentence[iStart+1];
@@ -2231,7 +2423,7 @@ bool ParsePUBX04(int fieldCount)
   iTmp = d2i(&nmeaSentence[iStart]);
   if (iTmp < 0)
   {
-    return false;
+    return NMEA_ERROR;
   }
   gpsPUBX04.usLeapSec = (uint8_t)iTmp;
 
@@ -2255,7 +2447,7 @@ bool ParsePUBX04(int fieldCount)
     }
     else
     {
-      return false;
+      return NMEA_ERROR;
     }
   }
    
@@ -2264,7 +2456,7 @@ bool ParsePUBX04(int fieldCount)
   //
   gpsPUBX04.valid = true;
   
-  return true;
+  return NMEA_PUBX04;
   
 } // end of parsePUBX04
 
