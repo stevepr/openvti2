@@ -1942,7 +1942,7 @@
 // SBP Addition /////////////////////////////////////////////////////////////////////////////////
 
   // Sends a array of chars to the specified location in Display Memory via auto-increment mode
-  //  * turns OFF all character attributes
+  //  * enables local background control but turns OFF all other character attributes
   //  * NO char mapping from ASCII
   //  * this routine will leave with autoincrement ON
   //  **** do NOT let other OSD code interrupt this routine!
@@ -1989,7 +1989,7 @@
     *deviceSelectPort &= ~deviceSelectMask;     // Set the chip select pin low 
                                                 //   to enable slave SPI.
     SPIObject->transfer( MAX7456_DMM_W );                 // Send register address.
-    SPIObject->transfer( (uint8_t)(1 << MAX7456_DMM_AI) );          // Send value to store
+    SPIObject->transfer( (uint8_t)((1 << MAX7456_DMM_AI) | (1 << MAX7456_DMM_LBC) ));          // Send value to store
     *deviceSelectPort |= deviceSelectMask;      // Set the chip select pin high 
 
     inAutoIncrement = true;   
@@ -2054,6 +2054,7 @@ uint8_t * heapptr, * stackptr;
     }
 
   } // end of atomax
+
 
 // Private Methods /////////////////////////////////////////////////////////////
 

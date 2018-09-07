@@ -266,6 +266,7 @@
 
       void          sendArray(uint16_t uAddr, uint8_t* cArray, int len);
       void          atomax( uint8_t* , uint8_t* , int );
+      bool          setGrayBackground( uint8_t );
       
     private:
     

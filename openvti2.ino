@@ -1,6 +1,19 @@
 /*
 
-OpenVTI
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+OpenVTI2
 
 This is VERSION 5 - reworked by SBP from Version 4 by MichaelF
 
@@ -59,31 +72,74 @@ I included zip files as well for original library
 #include <SPI.h>
 #include "MAX7456.h"
 
+//  Global Settings ///////////////////////////////////////////////////////////////
 #define VERSION  5
 
+#define GRAYBACKGROUND 1    // == 1 => set gray background behind OSD lines
+                            // == 0 => transparent background behind OSD lines
+
+
+#define TESTROW 0           // == 1 => enable third row at top of display for testing/debug
+                            // == 0 =>  no third row...
+
+// Global Constants & Variables ////////////////////////////////////////////////////////////
+//
+
+//*********************************
+//  General state info
+//
 enum CountSource
 {
   TCNT,
   ICR
 };
 
-// Global Constants & Variables ////////////////////////////////////////////////////////////
-const unsigned long gpsBaud = 9600;       
-
-// Startup Mode
+// Operating Modes
 //
-bool StartupExec;       // true => run , false => programming (don't do anything this time)
+enum OperatingMode
+{
+  Programming,            // => GPS is disconnected and ready to accept programming from PC
+  InitMode,               // => Power up initialization
+  WaitingForGPS,          // => Waiting to receive valid GPS data
+  Syncing,                // => Synchronizing internal time base with GPS data
+  TimeValid,              // => Time is valid  (nominal operating mode for time insertion)
+  ErrorMode,              // => Error was found
+  FailMode                // => Unrecoverable failure found
+};
+volatile OperatingMode CurrentMode;    // Current operating mode
+
+volatile int ErrorCountdown;
+#define ERROR_DISPLAY_SECONDS 2
+
+// Error Messsages
+//
+char msgGPSfail[] ="GPS init failed";
+#define len_msgGPSfail  15
+char msgWaiting[] = "Waiting for GPS";
+#define len_msgWaiting  15
+char msgSync[] = "Sync ";         // space for remainder
+#define len_msgSync  4
+char msgNoPPS[] = "*PPS ERROR*";
+#define len_msgNoPPS 11
+char msgSyncFailed[] = "*Sync FAILED*";
+#define len_msgSyncFailed 13
+char msgUnknownError[] = "*FATAL ERROR*";
+#define len_msgUnknownError 13
+
+char msgErrorCodes[] = "   ";
+#define len_msgErrorCodes 3
 
 
 //***************
 // OSD info
 //
+volatile bool EnableOverlay = false;      // update Overlay?
 
 // OSD object
 //
 MAX7456 OSD( osdChipSelect );
 
-//  OSD rows
+//  Local OSD rows
 //
 uint8_t TopRow[30];
 uint16_t TopRow_Addr = 30;            // Top Row is row 1
@@ -91,22 +147,16 @@ uint16_t TopRow_Addr = 30;            // Top Row is row 1
 uint8_t BottomRow[30];
 uint16_t BottomRow_Addr = 9 * 30;    // Top Row is row 11 (good for NTSC)
 
-#if 0
+#if (TESTROW == 1)
 uint8_t TestRow[30];
 #endif
 
 // location of UI elements
+//
 #define TOP_ROW_NTSC 11
 #define BOTTOM_ROW_NTSC  12
 #define TOP_ROW_PAL 14
 #define BOTTOM_ROW_PAL 15
-
-// solid character that blinks each PPS we receive
-#define PPSCHAR_COL 1
-#define PPSCHAR_ROW (BOTTOM_ROW)
-
-#define VSYNCCHAR_COL 0
-#define VSYNCCHAR_ROW (BOTTOM_ROW)
 
 #define FIELD1TS_COL 12
 #define FIELD1TS_ROW BOTTOM_ROW
@@ -118,31 +168,30 @@ uint8_t TestRow[30];
 #define FIELDTOT_ROW BOTTOM_ROW
 #define FIELDTOT_MAX 9999999        // max field count (row is only 29 char wide reliably)
 
-uint8_t videoStd;     // NTSC or PAL setting
-
 int osdTop_RowOffset = TOP_ROW_NTSC*30;   // display memory offset to start of ROW for cycling through data
 int osdTop_Col = 1;                       // starting colum in this ROW
 
 int osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;   // display memory offset to start of ROW for time data
 int osdBottom_Col = 1;
 
-// pixel offset of display    
+// pixel offset of display to Match IOTA-VTI
+//
 #define OSD_X_OFFSET  0
 #define OSD_Y_OFFSET  0
 
 //
-// Video info
+// Video input info
 //
-volatile bool EnableOverlay = false;
-volatile unsigned long fieldCount;
+uint8_t videoStd;     // NTSC or PAL setting
+
+volatile unsigned long fieldTotal;      // total number of fields (VSYNC pulses encountered)
 
 volatile int fieldParity = 0;           // 1=> field 1, 2=> field 2  (0 => not yet set)
-volatile unsigned long cntParityError;
 
 volatile unsigned long tk_VSYNC;      // vsync "time" = 2mhz ticks
 volatile unsigned long tk_HSYNC;      // hsync "time" = 2mhz ticks
 
-volatile unsigned short osdRotation = 0;             // rotation counter for top row
+volatile unsigned short osdRotation = 0;             // rotation counter for top row (uses only one byte of short so we don't have to worry about interrupts)
 
 //***********************
 //  Time
@@ -150,25 +199,38 @@ volatile unsigned short osdRotation = 0;             // rotation counter for top
 volatile unsigned short timer1_ov;    // timer 1 overflow count = high word of "time" (32ms per overflow)
 #define Timer_Second 2000000          // timer1 is running at about 2mhz
 #define Timer_Milli 2000              // approx ticks per millisecond
+#define PPS_TOLERANCE 2000            //  500us tolerance for PPS interval
+
+#define SYNC_SECONDS 5                // # of seconds for syncing to GPS time
+volatile short int TimeSync;          // ( > 0 ) => we are syncing to GPS sentence times = # of seconds remaining for sync (small value so no problem with ints)
+
+// YY-MM-DD HH:MM:SS time of current second
+//   note: all values are less than 255 => don't need to protect individual changes from interrupts during read/write
+//         values are only changed during PPS interrupt, so we will have no issue from interrupting multiple changes
+//
+volatile int sec_Year;                 // 2 digit
+volatile int sec_Mon;
+volatile int sec_Day;
+volatile int sec_hh;
+volatile int sec_mm;
+volatile int sec_ss;
 
 //******************
 // GPS info
 // 
 int gpsInitStatus;                        // GPS initialization status (0 => good)
+const unsigned long gpsBaud = 9600;       
 
 // PPS
 //
 volatile unsigned long tk_PPS;        // tick "time" of most recent PPS int
 volatile bool pps_now = false;        // true => PPS just happened
                                       
-volatile bool ppsValid = false;       // true => PPS is valid
 volatile bool time_UTC = false;       // true => time is currently UTC , false => time is currently GPS
 
 volatile int pps_HH;                  //  current pps time (HH:MM:SS)
 volatile int pps_MM;
 volatile int pps_SS;
-
-volatile int pps_countdown;           // # of pps interrupts until pps valid - used for synch with NMEA data
 
 // GPS serial data
 //
@@ -180,43 +242,10 @@ int nmeaCount = -1;                   // position of next char in NMEA sentence 
   
 #define MAX_FIELDS 17       // GGA has 17 fields (including the terminating CRLF)
 int fieldStart[MAX_FIELDS];   // start position of each field
-                              // end of field = (start of next field - 2)
+                              // end of field = (start of next field - 2)                         
 
-  // interal Sync'd time = "real" time - one second accuracy
-  //  Three states:
-  //    * Waiting to synchronize (waiting for PPS)
-  //    * Synchronizing (checking multiple PPS & NMEA data for consistency)
-  //    * Synchronized
-  //
-#define SYNC_SECONDS 5    // # of seconds for syncing to GPS time
-short int TimeSync;       // ( < 0 ) => waiting for PPS to begin sync
-                          // ( == 0) => syncronized
-                          // ( > 0 ) => we are syncing to GPS sentence times = # of seconds remaining for sync
-                          
-bool TimeValid;           // true => time is valid (PPS "active")
 
-char msgGPSfail[] ="GPS init failed";
-#define len_msgGPSfail  15
-char msgWaiting[] = "Waiting for GPS";
-#define len_msgWaiting  15
-char msgSync[] = "Sync ";         // space for remainder
-#define len_msgSync  4
-char msgNoPPS[] = "*NO PPS*";
-#define len_msgNoPPS 8
-
-char msgErrorCodes[] = "   ";
-#define len_msgErrorCodes 3
-
-  // YY-MM-DD HH:MM:SS time of current second
-  //
-int sec_Year;                 // 2 digit
-int sec_Mon;
-int sec_Day;
-int sec_hh;
-int sec_mm;
-int sec_ss;
-
-struct {
+volatile struct {
   bool valid;
   char mode;          // A or D => valid fix
   uint8_t hh;
@@ -267,12 +296,12 @@ void setup() {
   STARTUP_CFG_INPUT();
   if (STARTUP_READ())
   {
-    StartupExec = true;
+    CurrentMode = InitMode;
   }
   else
   {
     // just programming - leave now
-    StartupExec = false;
+    CurrentMode = Programming;
     return;
   }
 
@@ -281,7 +310,7 @@ void setup() {
   //
   
   EnableOverlay = false;      // turn off overlay update for now...
-  fieldCount = 0;
+  fieldTotal = 0;
   for (int i = 0; i< 30; i++) 
   {
     TopRow[i] = 0x00;
@@ -298,6 +327,24 @@ void setup() {
   // Init GPS
   //
   gpsInitStatus = gpsInit();
+  if (gpsInitStatus != 0)
+  {
+    // GPS init failed => non-recoveable
+    CurrentMode = FailMode;
+
+    // clear the current display lines
+    //
+    for( int i = 0; i < 30; i++ )
+    {
+      TopRow[i] = 0x00;
+      BottomRow[i] = 0x00;
+    }
+    
+    // GPS failure message
+    //
+    OSD.atomax(&BottomRow[1],(uint8_t*)msgGPSfail,len_msgGPSfail);
+    bytetodec2(&BottomRow[1 + len_msgGPSfail + 1],gpsInitStatus);
+  }
 
   //************
   //  Init max OSD chip
@@ -350,6 +397,24 @@ void setup() {
   OSD.setWhiteLevel(0);  // should be 0% black 120% white
   OSD.setCharEncoding(MAX7456_ASCII);       // use this char set
 
+  // setup background for OSD area
+  //
+#if (GRAYBACKGROUND != 1)
+  OSD.videoBackground();
+#else
+  OSD.setGrayLevel(4);
+  OSD.home();                               //
+  OSD.videoBackground();
+  for ( int r = 0; r < rows; r++ )
+  {
+    for ( int c = 0; c < cols; c++ )
+    {
+      OSD.write((uint8_t)0);
+    }
+  }
+  OSD.grayBackground();     // remaing writes will be gray background
+#endif
+
   // align with IOTA-VTI
   OSD.setTextOffset(OSD_X_OFFSET, OSD_Y_OFFSET);
   
@@ -386,8 +451,7 @@ void setup() {
   PPS_CFG_INPUT();
   PPS_CFG_EICRA();
   PPS_CFG_PCMSK();
-  PPS_CFG_EIMSK();
-  
+  PPS_CFG_EIMSK(); 
   
   // HSYNC
   //  no interrupt - just polled as an input
@@ -406,7 +470,15 @@ void setup() {
   //  OK, startup the regular cycle 
   //    * start by looking for GPS NMEA and PPS to get in sync
   //
-  TimeSync = -1;          // Not Synchronized
+  CurrentMode = WaitingForGPS;        // Now waiting for the GPS data to begin synchronizing
+  // write message
+  //
+  for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
+  {
+    BottomRow[i] = 0x00;
+  }   
+  OSD.atomax(&BottomRow[1], (uint8_t*)msgWaiting, len_msgWaiting);
+  
   time_UTC = false;
   EnableOverlay = true;   // start the overlay...
  
@@ -440,6 +512,11 @@ VSYNC_ISR()
   unsigned long timeDiff;
   uint8_t utmp;
   unsigned long ulTmp;
+
+  int vs_hh;      // local copies of this data to match the values at start of this ISR and before
+  int vs_mm;      // a subsequent PPS can change them
+  int vs_ss;
+  bool vs_blnUTC;
 
   //****************************************
   //  determine field parity
@@ -519,23 +596,57 @@ VSYNC_ISR()
 
   //************************
   // increment field count
+  //  - interrupts are OFF - ok to update the value
   //  - rollover after maximum value that can be displayed
   //
-  fieldCount++;
-  if (fieldCount > FIELDTOT_MAX)
-    fieldCount = 0;
+  fieldTotal++;
+  if (fieldTotal > FIELDTOT_MAX)
+    fieldTotal = 0;
 
+  //*********************
+  //  BEFORE enabling interrupts - save current time seconds in local variables to match time of VSYNC pulse
+  //
+  vs_hh = sec_hh;
+  vs_mm = sec_mm;
+  vs_ss = sec_ss;
+  vs_blnUTC = time_UTC;
   
   //****************************
   //  ENABLE interrupts again
   //
   interrupts();
 
+  //*************************************************
+  //  Update local display lines based on CurrentMode
+  //
+  //    * Programming Mode
+  //        - Shouldn't be here but just return anyway
+  //
+  //    * InitMode
+  //      - No display during this mode so just return
+  //
+  //    * WaitingForGPS
+  //    * ErrorMode
+  //    * FailMode
+  //    * Syncing
+  //    * TimeValid
+  //      - error checking
+  //      - update overlay
+  //
+  if ((CurrentMode == Programming) || (CurrentMode == InitMode))
+  {
+    return;     // leave now => don't update the display
+  }
 
+  //  Current mode must be WaitingForGPS, Syncing, TimeValid, ErrorMode, or FailMode
+  //  Display will be active in all of these modes
+  //
+  
   //*************************************************
   //  VSYNC UTC time
   //    - determine field time delay from latest PPS
   //
+  noInterrupts();           // protect tk_pps from interrupts
   if (tk_VSYNC >= tk_PPS)
   {
     timeDiff = tk_VSYNC - tk_PPS;
@@ -544,145 +655,82 @@ VSYNC_ISR()
   {
     timeDiff = 0 - (tk_PPS - tk_VSYNC);
   }
-
+  interrupts();
+  
   //
   // was the last PPS more than one second ago?
+  //   if we are in FailMode or WaitingforGPS mode, don't go to ErrorMode
   //
-  if ( timeDiff > (Timer_Second + 50))
+  if ( (timeDiff > (Timer_Second + PPS_TOLERANCE)) && (CurrentMode != FailMode) && (CurrentMode != WaitingForGPS) )
   {
-    // opps - not close enough to a one second difference => time stamps won't work
-    //
-    ppsValid = false;
-  }
-  else
-  {
-    ppsValid = true;
-  }
-  
-  //  watch for LONG delay from most recent PPS
-  //  if has been too long, we need to wait for the GPS again...
-  //
-  if (timeDiff > 0xFFFFFFF0)
-  {
-    // invalidate synchronization and wait again
-    //
-    TimeSync = -1;
-  }
-
-  // convert ticks to 0.1 ms
-  //
-  timeDiff /= (Timer_Milli / 10);
-
-  //**********************
-  //  update display info
-  //
-  if (!EnableOverlay)
-  {
-    return;   // nope, leave now...
-  }
-
-  // clear the current info
-  //
-  for( int i = 0; i < 30; i++ )
-  {
-    TopRow[i] = 0x00;
-    BottomRow[i] = 0x00;
-  }
-  
-  // field count - always display field count
-  //   but... rollover after 8 
-  //
-  ultodec(BottomRow + FIELDTOT_COL,fieldCount,0);     // no padding, left justified
-
-  // Determine the current state of the GPS sync
-  //    if (waiting for valid GPS PPS)
-  //      display field ticks & field counter
-  //    else if (PPS valid and synching)
-  //      display field ticks, field count and countdown
-  //    else
-  //      gps valid - display full dataset
-  //
-  if (TimeSync < 0)
-  {
-    // waiting to sync - show message on bottom line with field count
-    //
-    if (gpsInitStatus == 0)
-    {
-      // GPS init successful
-      //
-      OSD.atomax(&BottomRow[1],(uint8_t*)msgWaiting,len_msgWaiting);
-    }
-    else
-    {
-      // GPS init failed
-      OSD.atomax(&BottomRow[1],(uint8_t*)msgGPSfail,len_msgGPSfail);
-      bytetodec2(&BottomRow[1 + len_msgGPSfail + 1],gpsInitStatus);
-    }
     
-    // Top Line: field ticks
+    // opps - we should have seen a PPS by now... this is an error => move to error mode
     //
-    if (fieldParity == 1)
+    CurrentMode = ErrorMode;
+    ErrorCountdown = ERROR_DISPLAY_SECONDS;
+    
+    // bottom line - message & PPS
+    //
+    for( int i = 0; i < FIELDTOT_COL; i++ )
     {
-      // field 1
-      ultodec(TopRow + 1, tk_VSYNC, 10);  // write field 1 tick count
+      BottomRow[i] = 0x00;
+    }   
+    OSD.atomax(&BottomRow[1], (uint8_t*)msgNoPPS, len_msgNoPPS);
+    bytetodec2(BottomRow + len_msgNoPPS + 1,0);
+    
+  }
+
+  //***************************************************
+  //  UPDATE local display lines based on current mode
+  //
+
+  //  Branch by CurrentMode
+  //
+  //    *FailMode
+  //      * no more change to local memory lines => just update the OSD overlay with the current local memory lines (error info)
+  //
+  //    *ErrorMode
+  //      * TopRow: Field1/Field2 VSYNC times 
+  //      * BottomRow: Update field count only (leave existing error message)
+  //
+  //    *WaitingForGPS
+  //      * TopRow: Field1/Field2 VSYNC times 
+  //      * BottomRow: Update field count only (leave existing status message)
+  //
+  //    *Syncing
+  //      * TopRow: Field1/Field2 VSYNC times 
+  //      * BottomRow: Update field count only (leave existing status message)
+  //
+  //    *TimeValid
+  //      * TopRow: data field rotation 
+  //      * BottomRow: Update times & field count
+  //  
+  //  
+  if (CurrentMode != FailMode)
+  {
+     
+    // *** Update field count in lower right of BottomRow (display field count in all non-fail modes with an active display)
+    //
+    // clear the field count portion of the bottom row
+    //
+    for( int i = FIELDTOT_COL; i < 30; i++ )
+    {
+      BottomRow[i] = 0x00;
     }
-    else
+    ultodec(BottomRow + FIELDTOT_COL,fieldTotal,0);     // no padding, left justified
+  
+    // now update the rest of the display lines
+    //  
+    if ((CurrentMode == ErrorMode) || (CurrentMode == WaitingForGPS) || (CurrentMode == Syncing))
     {
-      // field 2
+      // clear the current top display line
       //
-      ultodec(TopRow + 15, tk_VSYNC, 10);  // write field 2 tick count
-    }
+      for( int i = 0; i < 30; i++ )
+      {
+        TopRow[i] = 0x00;
+      }
       
-  }
-  else if (TimeSync > 0)
-  {
-    // syncing
-    //
-
-    // Bottom Row
-    //  - watch for missing PPS
-    //
-    if (!ppsValid)
-    {
-      // we missed at least one PPS 
-      //
-      TimeSync = -1;    // switch to waiting for GPS again...
-      OSD.atomax(&BottomRow[1],(uint8_t*)msgWaiting,len_msgWaiting);
-    }
-    else
-    {
-      // PPS still good - sync count & field count (already written)
-      //
-      OSD.atomax(&BottomRow[1],(uint8_t*)msgSync,len_msgSync);
-      ultodec(&BottomRow[1 + len_msgSync + 1],(unsigned long)TimeSync,0);
-    }
-    
-    // Top Line: field ticks
-    //
-    if (fieldParity == 1)
-    {
-      // field 1
-      ultodec(TopRow + 1, tk_VSYNC, 10);  // write field 1 tick count
-    }
-    else
-    {
-      // field 2
-      //
-      ultodec(TopRow + 15, tk_VSYNC, 10);  // write field 2 tick count
-    }
-    // all done with synching section...
-  }
-  else
-  {
-    // TimeSync = 0  => synchronized
-    //   check to see if the pps is valid or dropped out
-    //
-    if (!ppsValid)
-    {
-      // Top Line: field ticks
-      //
-
-      // field count
+      // Top Row = update Field1/Field2 counts
       //
       if (fieldParity == 1)
       {
@@ -695,18 +743,20 @@ VSYNC_ISR()
         //
         ultodec(TopRow + 15, tk_VSYNC, 10);  // write field 2 tick count
       }
-
-      // bottom line - message & PPS & field count (already written)
-      //
-      OSD.atomax(&BottomRow[1], (uint8_t*)msgNoPPS, len_msgNoPPS);
-
-      ultodec(BottomRow + 1 + len_msgNoPPS + 1, tk_PPS, 10);      // 10 decimal chars for PPS ticks
       
     }
-    else
+    else if (CurrentMode == TimeValid)
     {
-      // pps is good, display the full info
+      // Nominal timing mode , update all timing info
       //
+      unsigned long tDiff;
+
+      // clear the top line data
+      //
+      for( int i = 0; i < 30; i++ )
+      {
+        TopRow[i] = 0x00;
+      }
 
       // OSD Top Row
       // Rotate through 
@@ -741,7 +791,7 @@ VSYNC_ISR()
             TopRow[1] = (gpsGGA.NS == 'N')? 0x18 : 0x1D;   // N or S
             OSD.atomax(TopRow + 3, gpsGGA.lat,MAX_LATLONG);
             TopRow[3 + MAX_LATLONG + 1] = (gpsGGA.EW == 'E')? 0x0F : 0x21;   // E or W
-            OSD.atomax(TopRow + 3 + MAX_LATLONG + 3,gpsGGA.lng, MAX_LATLONG);
+            OSD.atomax(TopRow + 3 + MAX_LATLONG + 2,gpsGGA.lng, MAX_LATLONG);
           }
           break;
 
@@ -784,9 +834,22 @@ VSYNC_ISR()
 
 
       // OSD Bottom Row ...
+      //  ** use "local" values saved at start of ISR to match state at that time
+      //
+      
+      tDiff = timeDiff / (Timer_Milli / 10);   // convert to 0.1ms for display
+
+      // clear the bottom row up to the field count
+      //
+      for( int i = 0; i < FIELDTOT_COL; i++ )
+      {
+        BottomRow[i] = 0x00;
+      }   
+
+      //
       // time base UTC or GPS
       //
-      BottomRow[1] = (time_UTC? 0x1F : 0x11);       // U (UTC) or G (GPS)
+      BottomRow[1] = (vs_blnUTC? 0x1F : 0x11);       // U (UTC) or G (GPS)
       
       //    - pps "mark" on first field after PPS
       //
@@ -807,43 +870,68 @@ VSYNC_ISR()
       {
         // field 1
         //
-        ultodec(BottomRow + FIELD1TS_COL, timeDiff, 4);  // write field 1 stamp, 4 chars, zero padded
+        ultodec(BottomRow + FIELD1TS_COL, tDiff, 4);  // write field 1 stamp, 4 chars, zero padded
+        
       }
       else
       {
         // field 2
         //
-        ultodec(BottomRow + FIELD2TS_COL, timeDiff, 4);  // write field 2 stamp, 4 chars, zero padded
+        ultodec(BottomRow + FIELD2TS_COL, tDiff, 4);  // write field 2 stamp, 4 chars, zero padded
      
       }
   
       // OSD Bottom Row
       //  - HH:MM:SS time
+      //  - protect from interrupts to maintain consistency of all values
       //  
-      bytetodec2(BottomRow + 3,sec_hh);
+      bytetodec2(BottomRow + 3,vs_hh);
       
       BottomRow[5] = 0x44;
   
-      bytetodec2(BottomRow + 6,sec_mm);
+      bytetodec2(BottomRow + 6,vs_mm);
       
       BottomRow[8] = 0x44;
   
-      bytetodec2(BottomRow + 9,sec_ss);
+      bytetodec2(BottomRow + 9,vs_ss);     
+    }
+    else
+    {
+      // What??? - shouldn't be here
+      //
+      CurrentMode = FailMode;
+      // clear the current display lines
+      //
+      for( int i = 0; i < 30; i++ )
+      {
+        TopRow[i] = 0x00;
+        BottomRow[i] = 0x00;
+      }
+      
+      //  failure message
+      //
+      OSD.atomax(&BottomRow[1],(uint8_t*)msgUnknownError,len_msgUnknownError);
+      
+    } // end of handling non-failure modes
+    
+  }  // end of mode checks
 
-    }  // end of check for pps valid
-  }  // end of check for TimeSync status
 
   //**************************
   // Update OSD
   //  - send updated info to Max7456
   //
-  OSD.sendArray(osdTop_RowOffset,TopRow,30);
-
-  OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
-
-#if 0
-  OSD.sendArray(5*30,TestRow,30); // testing...
-#endif
+  if (EnableOverlay)
+  {    
+    OSD.sendArray(osdTop_RowOffset,TopRow,30);
+  
+    OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
+  
+    #if (TESTROW == 1)
+    OSD.sendArray(5*30,TestRow,30); // testing...
+    #endif
+    
+  }
 
 } // end of VSYNC_ISR
 
@@ -874,9 +962,33 @@ PPS_ISR()
   //
   pps_now = true;
 
-  // if GPS init failed, skip all attempt to sync or display times....
+  //*******************
+  // What mode now?
+  //   if Programming, Init, or Fail , just leave
   //
-  if (gpsInitStatus != 0)
+  //  Validate PPS interval
+  //    if too long or too short => Error Mode (PPS error)
+  //   
+  //  *Error Mode
+  //    - If (error has displayed for two seconds)
+  //        move to Waiting for GPS mode
+  //    - else
+  //        return (no mode change)
+  //
+  //  *WaitingForGPS Mode
+  //    - if GPS data good
+  //        move to Syncing mode
+  //    - else
+  //        leave (keep waiting)
+  //
+  //  *Syncing Mode
+  //    - validate data and restart if necessary
+  //
+  //  *TimeValid Mode
+  //    - check for GPS/UTC switch
+  //
+  //
+  if ((CurrentMode == Programming) || (CurrentMode == InitMode) || (CurrentMode == FailMode))
   {
     return;
   }
@@ -898,27 +1010,64 @@ PPS_ISR()
     timeDiff = 0 - (timePrev - timeCurrent);
   }
   
-  // check for missing PPS pulses
-  //  if we missed any PPS pulses, we must re-sync
+  // Check delay since last PPS pulse...
+  //  if too short or too long and we are not in WaitingForGPS mode
+  //      go to Error mode
   //
-  if (timeDiff > (Timer_Second + Timer_Milli))
+  if ( (timeDiff < (Timer_Second - PPS_TOLERANCE)) || (timeDiff > (Timer_Second + PPS_TOLERANCE)) && (CurrentMode != WaitingForGPS) )
   {
-    TimeSync = -1;
+    CurrentMode = ErrorMode;
+    
+    // write error message
+    //
+    for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
+    {
+      BottomRow[i] = 0x00;
+    }   
+    OSD.atomax(&BottomRow[1], (uint8_t*)msgNoPPS, len_msgNoPPS);
+    bytetodec2(BottomRow + len_msgNoPPS + 1,1);
+
+    // set error countdown
+    //
+    ErrorCountdown = ERROR_DISPLAY_SECONDS;
+    
   }
 
-  //  what is our sychronizing status?
+  // Mode?
   //
-  if (TimeSync == 0)
+  if ( CurrentMode == ErrorMode )
   {
-    // already synchronized
+    // ERROR MODE
+    // decrement counter and see if we are done displaying the message
     //
-        
+    ErrorCountdown--;
+    if (ErrorCountdown <= 0)
+    {
+      // we can move to WaitingForGPS now
+      //
+      CurrentMode = WaitingForGPS;
+      
+      // write message
+      //
+      for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
+      {
+        BottomRow[i] = 0x00;
+      }   
+      OSD.atomax(&BottomRow[1], (uint8_t*)msgWaiting, len_msgWaiting);
+      
+    }
+  }
+  else if ( CurrentMode == TimeValid )
+  {
+    // TimeValid Mode
+    //
+    
     // check for switch from GPS to UTC time
     //
     if (!time_UTC)
     {
       // time has been GPS based
-      //  - check for valid almanac before moving on
+      //  - do we have a valid almanac now?
       //
       if (gpsPUBX04.valid && gpsPUBX04.blnLeapValid)
       {
@@ -928,7 +1077,6 @@ PPS_ISR()
         sec_mm = gpsRMC.mm;
         sec_hh = gpsRMC.hh;
         SecInc();             // bump the count by one to match the second for THIS PPS signal
-
         time_UTC = true;      // UTC now
       }
     }
@@ -938,8 +1086,11 @@ PPS_ISR()
     SecInc();
     
   }
-  else if (TimeSync < 0)
+  else if ( CurrentMode == WaitingForGPS )
   {
+    // WaitingForGPS mode
+    //
+    
     // we are waiting to synchronize
     //  if we have a valid time from the serial data, start the process
     //
@@ -955,43 +1106,69 @@ PPS_ISR()
       sec_ss = gpsRMC.ss;
       sec_mm = gpsRMC.mm;
       sec_hh = gpsRMC.hh;
-      SecInc();             // bump the count by one to match the second for THIS PPS signal    
+      SecInc();               // bump the count by one to match the second for THIS PPS signal    
     }
 
-    // we will check the next five seconds for consistency
+    // GPS data looks good => move to Syncing mode (we will check the next five seconds for consistency)
     //
-    TimeSync = 5;
+    CurrentMode = Syncing;
+    TimeSync = SYNC_SECONDS;
+    
+    // update sync count & field count (already written)
+    //
+    for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
+    {
+      BottomRow[i] = 0x00;
+    }   
+    OSD.atomax(&BottomRow[1],(uint8_t*)msgSync,len_msgSync);
+    ultodec(&BottomRow[1 + len_msgSync + 1],(unsigned long)TimeSync,0);
     
   }
-  else
+  else if ( CurrentMode == Syncing )
   {
-    // TimeSync > 0 => we are synchronizing now
+    int ErrorFound;
+    
+    // SYNCING mode
     //
-
-    // validation 1 : was last PPS about one second away?
+    ErrorFound = 0;
+            
+    // validation 1 : was last PPS about one second away?  we checked this earlier
     //
-    if ( (timeDiff < (Timer_Second - Timer_Milli)) || (timeDiff > (Timer_Second + Timer_Milli)))
-    {
-      // opps - not close enough to a one second difference => restart the process
-      //
-      TimeSync = -1;      // waiting to sync again
-      return;
-    }
 
     // validation 2 : check the time stamp
     //   we have not yet incremented the time, so it should match the current NMEA value
+    //   
     //
     if ((!gpsRMC.valid) || (!gpsPUBX04.valid))
     {
-      // failed - restart
-      TimeSync = -1;
-      return;
+      ErrorFound = 1;
     }
     else if ((gpsRMC.hh != sec_hh) || (gpsRMC.mm != sec_mm) || (gpsRMC.ss != sec_ss))
     {
-      // failed
+      ErrorFound = 2;
+    }
+    else if ((gpsRMC.mode != 'A') && (gpsRMC.mode != 'D'))
+    {
+      ErrorFound = 3;
+    }
+
+    // if error, report it and return
+    //
+    if (ErrorFound > 0)
+    {
+      // failed the test - report error 
       //
-      TimeSync = -1;
+      CurrentMode = ErrorMode;
+      ErrorCountdown = ERROR_DISPLAY_SECONDS;
+      
+      // Error message
+      //
+      for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
+      {
+        BottomRow[i] = 0x00;
+      }   
+      OSD.atomax(&BottomRow[1],(uint8_t*)msgSyncFailed,len_msgSyncFailed);
+      bytetodec2(BottomRow + len_msgNoPPS + 2,(byte)ErrorFound + 3);
       return;
     }
     
@@ -999,6 +1176,10 @@ PPS_ISR()
     //
     SecInc();  
     TimeSync --;
+    
+    // update sync count & field count (already written)
+    //
+    ultodec(&BottomRow[1 + len_msgSync + 1],(unsigned long)TimeSync,0);
 
     // are we all done with the sync?
     //
@@ -1012,7 +1193,7 @@ PPS_ISR()
       sec_ss = gpsRMC.ss;
       sec_mm = gpsRMC.mm;
       sec_hh = gpsRMC.hh;
-      SecInc();             // bump the count by one to match the second for THIS PPS signal
+      SecInc();               // bump the count by one to match the second for THIS PPS signal
 
       // check for leap second status of the time from RMC
       //
@@ -1034,12 +1215,32 @@ PPS_ISR()
         
       } // end of check for leap second status
 
-      
-      // ready to roll
+      // We now have a valid time base... 
       //
-      ppsValid == true;
-    }
+      CurrentMode = TimeValid;
+      
+    }  // end of TimeSync = 0 section
+
   }
+  else
+  {
+    // WHAT???
+    //
+    CurrentMode = FailMode;    
+    
+    // clear the current display lines
+    //
+    for( int i = 0; i < 30; i++ )
+    {
+      TopRow[i] = 0x00;
+      BottomRow[i] = 0x00;
+    }
+    
+    //  failure message
+    //
+    OSD.atomax(&BottomRow[1],(uint8_t*)msgUnknownError,len_msgUnknownError);
+    
+  }  // end of check for current mode
     
 } // end of PPS_ISR
 
@@ -1089,10 +1290,15 @@ unsigned long GetTicks(CountSource src)
 } // end of GetTicks()
 
 //=================================================
-//  SecInc - increment second
+//  SecInc - increment second 
+//   note: interrupts are disabled while making this change across multiple values
 //=================================================
 void SecInc()
 {
+  uint8_t savSREG;
+
+  savSREG = SREG;
+  noInterrupts();       // disable all interrupts to protect this operation
   sec_ss++;
   if (sec_ss == 60)
   {
@@ -1108,6 +1314,8 @@ void SecInc()
       }
     }
   }
+  SREG = savSREG;     // restore interrupt status
+  
 } // end of SecInc
 
 //**********************************************************************************************************
@@ -1592,13 +1800,13 @@ bool ParseNMEA()
           ((char)nmeaSentence[fStart+4] == 'M') &&
           ((char)nmeaSentence[fStart+5] == 'C') )
     {
-      return ParseRMC();
+      return ParseRMC(fieldCount);
     }
     else if ( ((char)nmeaSentence[fStart+3] == 'G') &&
           ((char)nmeaSentence[fStart+4] == 'G') &&
           ((char)nmeaSentence[fStart+5] == 'A') )
     {
-      return ParseGGA();
+      return ParseGGA(fieldCount);
     }
     else if ( ((char)nmeaSentence[fStart+3] == 'D') &&
           ((char)nmeaSentence[fStart+4] == 'T') &&
@@ -1627,11 +1835,11 @@ bool ParseNMEA()
     {
       // PUBX,04 sentence
       //
-      return ParsePUBX04();
+      return ParsePUBX04(fieldCount);
     } 
     else
     {
-      // unkown PUBX sentence => do nothing
+      // unknown PUBX sentence => do nothing
       //
       return true;
       
@@ -1654,7 +1862,7 @@ bool ParseNMEA()
 //    fieldStart[] - array of starting indicies for fields
 //    fieldCount = # of fields (including CRLF)
 //=============================================================
-bool ParseGGA()
+bool ParseGGA(int fieldCount)
 {
   int iStart;
   int iLen;
@@ -1662,13 +1870,15 @@ bool ParseGGA()
 
   gpsGGA.valid = false;
 
+#if 0
   // should be 17 fields including the CRLF at the end
   //
   if (fieldCount < 17)
   {
     return false;
   }
-  
+#endif
+
   //******************************
   // field 2 = Latitude
   //
@@ -1843,19 +2053,21 @@ bool ParseGGA()
 //    fieldStart[] - array of starting indicies for fields
 //    fieldCount = # of fields (including CRLF)
 //=============================================================
-bool ParseRMC()
+bool ParseRMC(int fieldCount)
 {
   int iStart;
   int iLen;
 
   gpsRMC.valid = false;
 
+#if 0
   // should be 14 fields including the CRLF at the end
   //
   if (fieldCount < 14)
   {
     return false;
   }
+#endif
 
   //******************************
   // field 1 = HH:MM:SS time
@@ -1867,7 +2079,12 @@ bool ParseRMC()
   {
     return false; 
   }
-  
+
+  //*** protect from interrupts ***
+  //  hh,mm,ss from the RMC sentence may be used by ISR for the PPS signal
+  //  we should keep these changes "atomic"
+  //
+  noInterrupts();
   gpsRMC.hh = d2i( &nmeaSentence[iStart]);
   if (gpsRMC.hh < 0)
   {
@@ -1886,7 +2103,8 @@ bool ParseRMC()
     gpsRMC.valid = false;
     return false;
   }
-
+  interrupts();
+  
   //****************************
   // field 9 = ddmmyy Date 
   //
@@ -1945,7 +2163,7 @@ bool ParseRMC()
 //    fieldStart[] - array of starting indicies for fields
 //    fieldCount = # of fields (including CRLF)
 //=============================================================
-bool ParsePUBX04()
+bool ParsePUBX04(int fieldCount)
 {
   int iStart;
   int iLen;
@@ -1953,12 +2171,14 @@ bool ParsePUBX04()
 
   gpsPUBX04.valid = false;
 
+#if 0
   // should be 12 fields including the CRLF at the end
   //
   if (fieldCount < 12)
   {
     return false;
   }
+#endif
   
   //******************************
   // field 6 = LEAP seconds
