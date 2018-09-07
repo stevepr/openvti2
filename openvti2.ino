@@ -643,7 +643,7 @@ VSYNC_ISR()
   //
   
   //*************************************************
-  //  VSYNC UTC time
+  //  VSYNC time
   //    - determine field time delay from latest PPS
   //
   noInterrupts();           // protect tk_pps from interrupts
@@ -960,6 +960,7 @@ PPS_ISR()
 
   //  flag for "flash" on PPS
   //
+  //
   pps_now = true;
 
   //*******************
@@ -1071,12 +1072,13 @@ PPS_ISR()
       //
       if (gpsPUBX04.valid && gpsPUBX04.blnLeapValid)
       {
-        // aha... we have switched from GPS time to UTC => reset seconds...
+        // aha... we now have a current value for of GPS-UTC offset
+        //  decrement time by this number of seconds and mark it as UTC time now...
         //
-        sec_ss = gpsRMC.ss;
-        sec_mm = gpsRMC.mm;
-        sec_hh = gpsRMC.hh;
-        SecInc();             // bump the count by one to match the second for THIS PPS signal
+        for( int i = 0; i < gpsPUBX04.usLeapSec; i++)
+        {
+          SecDec();            
+        }
         time_UTC = true;      // UTC now
       }
     }
@@ -1317,6 +1319,35 @@ void SecInc()
   SREG = savSREG;     // restore interrupt status
   
 } // end of SecInc
+
+//=================================================
+//  SecDec - decrement second 
+//   note: interrupts are disabled while making this change across multiple values
+//=================================================
+void SecDec()
+{
+  uint8_t savSREG;
+
+  savSREG = SREG;
+  noInterrupts();       // disable all interrupts to protect this operation
+  sec_ss--;
+  if (sec_ss == -1)
+  {
+    sec_ss = 59;
+    sec_mm--;
+    if (sec_mm == -1)
+    {
+      sec_mm = 59;
+      sec_hh--;
+      if (sec_hh == -1)
+      {
+        sec_hh = 23;
+      }
+    }
+  }
+  SREG = savSREG;     // restore interrupt status
+  
+} // end of SecDec
 
 //**********************************************************************************************************
 // NEO 6 GPS routines
