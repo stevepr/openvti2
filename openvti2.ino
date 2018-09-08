@@ -867,7 +867,7 @@ VSYNC_ISR()
       
       //    - pps "mark" on first field after PPS
       //
-      if (pps_now)
+      if ((pps_now) && (tk_VSYNC > tk_PPS))
       {
         BottomRow[0] = 0xFA;
         pps_now = false;
