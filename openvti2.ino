@@ -79,7 +79,7 @@ I included zip files as well for original library
                             // == 0 => transparent background behind OSD lines
 
 
-#define TESTROW 1           // == 1 => enable third row at top of display for testing/debug
+#define TESTROW 0           // == 1 => enable third row at top of display for testing/debug
                             // == 0 =>  no third row...
 
 // Global Constants & Variables ////////////////////////////////////////////////////////////
@@ -196,10 +196,14 @@ volatile unsigned short osdRotation = 0;             // rotation counter for top
 //***********************
 //  Time
 //
-volatile unsigned short timer1_ov;    // timer 1 overflow count = high word of "time" (32ms per overflow)
-#define Timer_Second 2000000          // timer1 is running at about 2mhz
+volatile unsigned short timer1_ov;                      // timer 1 overflow count = high word of "time" (32ms per overflow)
+volatile unsigned long Timer_Second = 2000000;          // timer1 is running at about 2mhz
+volatile unsigned long PPS_TOLERANCE = 2000;            //  500us tolerance for PPS interval
 #define Timer_Milli 2000              // approx ticks per millisecond
-#define PPS_TOLERANCE 2000            //  500us tolerance for PPS interval
+
+volatile unsigned long tk_pps_interval_total=0;         // sum of pps intervals
+volatile unsigned long tk_pps_interval_count=0;         // # of pps interval
+volatile unsigned long tk_pps_interval_ave=0;           // average pps interval
 
 #define SYNC_SECONDS 5                // # of seconds for syncing to GPS time
 volatile short int TimeSync;          // ( > 0 ) => we are syncing to GPS sentence times = # of seconds remaining for sync (small value so no problem with ints)
@@ -508,9 +512,22 @@ void loop() {
 
     // get & parse serial data from GPS
     //
-
     ReadGPS();
-  }
+
+    // compute average PPS every 10 seconds
+    //
+    if ( tk_pps_interval_count == 10 )
+    {
+      noInterrupts();
+      tk_pps_interval_ave = tk_pps_interval_total / tk_pps_interval_count;      // compute the average delay between PPS intervals
+      Timer_Second = tk_pps_interval_ave;                                       // use this average as the new definition of a second
+      
+      tk_pps_interval_total = 0;                                                // reset
+      tk_pps_interval_count = 0;
+      interrupts();
+    }
+    
+  } // end of loop
 
 } // end of loop()
 
@@ -680,6 +697,11 @@ VSYNC_ISR()
     
     // opps - we should have seen a PPS by now... this is an error => move to error mode
     //
+    noInterrupts();                 // clear the ave interval computation
+    tk_pps_interval_total = 0;
+    tk_pps_interval_count = 0;
+    interrupts();
+    
     CurrentMode = ErrorMode;
     ErrorCountdown = ERROR_DISPLAY_SECONDS;
     
@@ -704,15 +726,15 @@ VSYNC_ISR()
   //      * no more change to local memory lines => just update the OSD overlay with the current local memory lines (error info)
   //
   //    *ErrorMode
-  //      * TopRow: Field1/Field2 VSYNC times 
+  //      * TopRow: LastPPS/Field1/Field2 times 
   //      * BottomRow: Update field count only (leave existing error message)
   //
   //    *WaitingForGPS
-  //      * TopRow: Field1/Field2 VSYNC times 
+  //      * TopRow: LastPPS / Field1/Field2 times 
   //      * BottomRow: Update field count only (leave existing status message)
   //
   //    *Syncing
-  //      * TopRow: Field1/Field2 VSYNC times 
+  //      * TopRow: LastPPS / Field1/Field2 times 
   //      * BottomRow: Update field count only (leave existing status message)
   //
   //    *TimeValid
@@ -743,19 +765,23 @@ VSYNC_ISR()
       {
         TopRow[i] = 0x00;
       }
+
+      // Top Row - Last PPS count (hex)
+      //
+      ultohex(TopRow + 1, tk_PPS);
       
       // Top Row = update Field1/Field2 counts
       //
       if (fieldParity == 1)
       {
         // field 1
-        ultodec(TopRow + 1, tk_VSYNC, 10);  // write field 1 tick count
+        ultohex(TopRow + 10, tk_VSYNC);  // write field 1 tick count
       }
       else
       {
         // field 2
         //
-        ultodec(TopRow + 15, tk_VSYNC, 10);  // write field 2 tick count
+        ultohex(TopRow + 20, tk_VSYNC);  // write field 2 tick count
       }
       
     }
@@ -957,6 +983,7 @@ PPS_ISR()
   unsigned long timeCurrent;
   unsigned long timePrev;
   unsigned long timeDiff;
+  unsigned long ppsDiff;
 
   // get the HSYNC time from the input capture register
   //   falling edge => start of Horizontal blanking
@@ -1024,6 +1051,7 @@ PPS_ISR()
   {
     timeDiff = 0 - (timePrev - timeCurrent);
   }
+  ppsDiff = timeDiff;       // PPS interval between now and the last PPS
   
   // Check delay since last PPS pulse...
   //  if too short or too long and we are not in WaitingForGPS mode
@@ -1032,6 +1060,11 @@ PPS_ISR()
   if ( (timeDiff < (Timer_Second - PPS_TOLERANCE)) || (timeDiff > (Timer_Second + PPS_TOLERANCE)) && (CurrentMode != WaitingForGPS) )
   {
     CurrentMode = ErrorMode;
+
+    noInterrupts();                 // clear the ave interval computation
+    tk_pps_interval_total = 0;
+    tk_pps_interval_count = 0;
+    interrupts();
     
     // write error message
     //
@@ -1078,7 +1111,18 @@ PPS_ISR()
     
     // TimeValid Mode
     //
-    
+
+    // update total delays
+    //
+    tk_pps_interval_total += ppsDiff;
+    tk_pps_interval_count++;
+#if (TESTROW == 1)
+    if (tk_pps_interval_ave != 0)
+    {
+      ultodec(&TestRow[1], tk_pps_interval_ave,10);
+    }
+#endif    
+
     // check for switch from GPS to UTC time
     //
     if (!time_UTC)
@@ -1238,6 +1282,11 @@ PPS_ISR()
       //
       CurrentMode = ErrorMode;
       ErrorCountdown = ERROR_DISPLAY_SECONDS;
+
+      noInterrupts();                 // clear the ave interval computation
+      tk_pps_interval_total = 0;
+      tk_pps_interval_count = 0;
+      interrupts();
       
       // Error message
       //
@@ -1904,6 +1953,11 @@ bool ReadGPS()
 #endif              
               CurrentMode = ErrorMode;
               ErrorCountdown = ERROR_DISPLAY_SECONDS;
+
+              noInterrupts();                 // clear the ave interval computation
+              tk_pps_interval_total = 0;
+              tk_pps_interval_count = 0;
+              interrupts();
               
               // Error message
               //
