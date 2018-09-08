@@ -79,7 +79,7 @@ I included zip files as well for original library
                             // == 0 => transparent background behind OSD lines
 
 
-#define TESTROW 0           // == 1 => enable third row at top of display for testing/debug
+#define TESTROW 1           // == 1 => enable third row at top of display for testing/debug
                             // == 0 =>  no third row...
 
 // Global Constants & Variables ////////////////////////////////////////////////////////////
@@ -246,6 +246,11 @@ int nmeaCount = -1;                   // position of next char in NMEA sentence 
 int fieldStart[MAX_FIELDS];   // start position of each field
                               // end of field = (start of next field - 2)                         
 
+volatile unsigned long tk_NMEAStart;
+volatile int n_hh;
+volatile int n_mm;
+volatile int n_ss;
+volatile bool n_blnUTC;
 volatile unsigned long tk_GPSRMC;   // time (ticks) for start of current RMC data (if valid)
 volatile unsigned long tk_PUBX04;   // time of start of current PUBX04 data (if valid)
 
@@ -281,6 +286,9 @@ struct {
 
 struct {
   bool valid;
+  uint8_t hh;
+  uint8_t mm;
+  uint8_t ss;
   uint8_t usLeapSec;      // current leap seconds
   bool  blnLeapValid;     // true => leap seconds is up to date, false => using firmware default value
   uint8_t cLeap[3];       // leap seconds field from sentence
@@ -1091,86 +1099,6 @@ PPS_ISR()
       }
     }
 
-    // if we have valid RMC data, check it against our internal time
-    //  if mismatch => error
-    //
-    ErrorFound = 0;
-    if ((gpsRMC.valid)&& ((gpsRMC.mode != 'A') || (gpsRMC.mode != 'D')) )
-    {
-      // now checking timing of this RMC sentence... it must have arrived within one second of this pps
-      //
-      if (timeCurrent > tk_GPSRMC)
-      {
-        timeDiff = timeCurrent - tk_GPSRMC;
-      }
-      else
-      {
-        timeDiff = 0 - (tk_GPSRMC - timeCurrent);
-      }
-      
-      if (timeDiff < Timer_Second)
-      {
-        long internalSec;
-        long rmcSec;
-        
-        // ok, this RMC arrived recently... check the RMC time against internal time
-        //   but keep in mind GPS-UTC offset...
-        //
-        internalSec = sec_hh*3600 + sec_mm*60 + sec_ss;
-        
-        if (!time_UTC)
-        {
-          // internal time is GPS
-          //  ... assume RMC is based on default UTC offset and compute GPS time from RMC
-          //
-          rmcSec = gpsRMC.hh*3600 + gpsRMC.mm * 60 + gpsRMC.ss;
-          rmcSec += offsetUTC_Default;                            // move to GPS time
-          if (rmcSec != internalSec)
-          {
-            ErrorFound = 10;
-          }
-        }
-        else
-        {
-          // internal time is UTC
-          //   RMC could be using either default UTC offset or "true" UTC offset
-          //
-          rmcSec = gpsRMC.hh*3600 + gpsRMC.mm * 60 + gpsRMC.ss;
-          if (rmcSec != internalSec)
-          {
-            // true offset didn't work, try the default offset
-            //
-            rmcSec -= (offsetUTC_Current - offsetUTC_Default);
-            if (rmcSec != internalSec)
-            {
-              ErrorFound = 11;
-            }
-          }
-         
-        }
-        
-      } // end of check for timing of RMC
-      
-    } // end of gpsRMC valid check
-
-    // Did we find an error?
-    //
-    if (ErrorFound > 0)
-    {
-      CurrentMode = ErrorMode;
-      ErrorCountdown = ERROR_DISPLAY_SECONDS;
-      
-      // Error message
-      //
-      for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
-      {
-        BottomRow[i] = 0x00;
-      }   
-      OSD.atomax(&BottomRow[1],(uint8_t*)msgNoPPS,len_msgSyncFailed);
-      bytetodec2(BottomRow + len_msgNoPPS + 2,(byte)ErrorFound);
-      return;
-    }
-    
     // NOW increment the time by one second for this PPS
     //
     SecInc();
@@ -1187,6 +1115,11 @@ PPS_ISR()
     if ((!gpsRMC.valid) || (!gpsPUBX04.valid))
     {
       // no valid RMC or PUBX04, keep waiting
+      return;
+    }
+    else if ((gpsRMC.mode != 'A') && (gpsRMC.mode != 'D'))
+    {
+      // wait for a good fix
       return;
     }
     else
@@ -1253,7 +1186,7 @@ PPS_ISR()
       if (timeDiff > Timer_Second)
       {
         // oops... this RMC was sent MORE than one second befor this PPS
-        ErrorFound = 4;
+        ErrorFound = 4;    
       }
       else
       {
@@ -1800,13 +1733,11 @@ bool ubxGetAck(uint8_t *MSG)
 //=============================================================
 bool ReadGPS()
 {
-  int n_hh;
-  int n_mm;
-  int n_ss;
-  bool n_blnUTC;
   char c;
-  unsigned long tk_Start;
   int resultParse;
+  long internalSec;
+  long ubxSec;
+  int ErrorFound;
 
   //************
   // Read/process all currently available characters
@@ -1827,8 +1758,9 @@ bool ReadGPS()
       // start of a sentence
       //
       noInterrupts();
-      tk_Start = GetTicks(TCNT);
+      tk_NMEAStart = GetTicks(TCNT);
       interrupts();
+      
       // save the current hh:mm:ss time
       //
       noInterrupts();
@@ -1899,11 +1831,15 @@ bool ReadGPS()
         //
         if (resultParse == NMEA_RMC)
         {
-          tk_GPSRMC = tk_Start;
+          
+          // NMEA_RMC sentence...
+          //
+          tk_GPSRMC = tk_NMEAStart;     // save start time
+          
         }
         else if (resultParse == NMEA_PUBX04)
         {
-          tk_PUBX04 = tk_Start;     // save start time
+          tk_PUBX04 = tk_NMEAStart;     // save start time
 
           // update current or default GPS-UTC offset value
           //
@@ -1915,7 +1851,74 @@ bool ReadGPS()
           {
             offsetUTC_Default = gpsPUBX04.usLeapSec;
           }
-        }
+          
+          // now check PUBX04 time against internal time to catch errors...
+          //
+          ErrorFound = 0;
+          if ( CurrentMode == TimeValid )
+          {
+            
+            internalSec = n_hh*3600 + n_mm*60 + n_ss;   // internal seconds of the day
+            
+            if (!n_blnUTC)
+            {
+              // internal time is GPS
+              //
+              ubxSec = gpsPUBX04.hh*3600 + gpsPUBX04.mm * 60 + gpsPUBX04.ss;
+              if (gpsPUBX04.blnLeapValid )
+              {
+                ubxSec += offsetUTC_Current;      // move to GPS time
+              }
+              else
+              { 
+                ubxSec += offsetUTC_Default;      // move to GPS time
+              }
+              
+              if (ubxSec != internalSec)
+              {
+                ErrorFound = 10;
+              }            
+              
+            }
+            else
+            {
+              // internal time is UTC
+              //   UBX time should be UTC also
+              //
+              ubxSec = gpsPUBX04.hh*3600 + gpsPUBX04.mm * 60 + gpsPUBX04.ss;
+              if (ubxSec != internalSec)
+              {
+                ErrorFound = 11;
+              }
+             
+            } // end of checking internal time for UTC
+          
+            // Did we find an error?
+            //
+            if (ErrorFound > 0)
+            {
+#if (TESTROW == 1)
+             ultodec(TestRow + 1, offsetUTC_Default, 6);  // write tick count
+             ultodec(TestRow + 10, internalSec, 8);  // write tick count
+             ultodec(TestRow + 20, ubxSec, 8);  // write tick count
+#endif              
+              CurrentMode = ErrorMode;
+              ErrorCountdown = ERROR_DISPLAY_SECONDS;
+              
+              // Error message
+              //
+              for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
+              {
+                BottomRow[i] = 0x00;
+              }   
+              OSD.atomax(&BottomRow[1],(uint8_t*)msgNoPPS,len_msgSyncFailed);
+              bytetodec2(BottomRow + len_msgNoPPS + 2,(byte)ErrorFound);
+            }
+              
+          } // end of RMC check against internal time
+          
+        } // end of processing for RMC,PUBX04 data
+        
         // looking for new sentence now...
         //
         nmeaCount = 0;
@@ -2311,19 +2314,19 @@ int ParseRMC(int fieldCount)
   gpsRMC.hh = d2i( &nmeaSentence[iStart]);
   if (gpsRMC.hh < 0)
   {
-    gpsRMC.valid = false;
+     interrupts();
     return NMEA_ERROR;
   }
   gpsRMC.mm = d2i( &nmeaSentence[iStart+2]);
   if (gpsRMC.mm < 0)
   {
-    gpsRMC.valid = false;
+    interrupts();
     return NMEA_ERROR;
   }
   gpsRMC.ss = d2i( &nmeaSentence[iStart+4]);
   if (gpsRMC.ss < 0)
   {
-    gpsRMC.valid = false;
+    interrupts();
     return NMEA_ERROR;
   }
   interrupts();
@@ -2342,19 +2345,16 @@ int ParseRMC(int fieldCount)
   gpsRMC.day = d2i( &nmeaSentence[iStart]);
   if (gpsRMC.day < 0)
   {
-    gpsRMC.valid = false;
     return NMEA_ERROR;
   }
   gpsRMC.mon = d2i( &nmeaSentence[iStart+2]);
   if (gpsRMC.mon < 0)
   {
-    gpsRMC.valid = false;
     return NMEA_ERROR;
   }
   gpsRMC.yr = d2i( &nmeaSentence[iStart+4]);
   if (gpsRMC.yr < 0)
   {
-    gpsRMC.valid = false;
     return NMEA_ERROR;
   }
 
@@ -2402,6 +2402,33 @@ int ParsePUBX04(int fieldCount)
     return NMEA_ERROR;
   }
 #endif
+
+  //******************************
+  // field 2 = hhmmss.ss
+  //
+  iStart = fieldStart[2];
+  iLen = fieldStart[3] - iStart - 1;
+
+  if (iLen < 6)
+  {
+    return NMEA_ERROR; 
+  }
+
+  gpsPUBX04.hh = d2i( &nmeaSentence[iStart]);
+  if (gpsPUBX04.hh < 0)
+  {
+    return NMEA_ERROR;
+  }
+  gpsPUBX04.mm = d2i( &nmeaSentence[iStart+2]);
+  if (gpsPUBX04.mm < 0)
+  {
+    return NMEA_ERROR;
+  }
+  gpsPUBX04.ss = d2i( &nmeaSentence[iStart+4]);
+  if (gpsPUBX04.ss < 0)
+  {
+    return NMEA_ERROR;
+  }
   
   //******************************
   // field 6 = LEAP seconds
