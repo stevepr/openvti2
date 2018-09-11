@@ -79,7 +79,7 @@ I included zip files as well for original library
                             // == 0 => transparent background behind OSD lines
 
 
-#define TESTROW 0           // == 1 => enable third row at top of display for testing/debug
+#define TESTROW 1           // == 1 => enable third row at top of display for testing/debug
                             // == 0 =>  no third row...
 
 // Global Constants & Variables ////////////////////////////////////////////////////////////
@@ -107,6 +107,10 @@ enum OperatingMode
   FailMode                // => Unrecoverable failure found
 };
 volatile OperatingMode CurrentMode;    // Current operating mode
+
+
+#define SYNC_SECONDS 10                // # of seconds for syncing to GPS time
+volatile short int TimeSync;          // ( > 0 ) => we are syncing to GPS sentence times = # of seconds remaining for sync (small value so no problem with ints)
 
 volatile int ErrorCountdown;
 #define ERROR_DISPLAY_SECONDS 2
@@ -197,16 +201,14 @@ volatile unsigned short osdRotation = 0;             // rotation counter for top
 //  Time
 //
 volatile unsigned short timer1_ov;                      // timer 1 overflow count = high word of "time" (32ms per overflow)
-volatile unsigned long Timer_Second = 2000000;          // timer1 is running at about 2mhz
+volatile unsigned long Timer_Second = 2000000;          // # of ticks for 1 second
+volatile unsigned long Timer_100us = 200;               // # of ticks for 100 microseconds
 volatile unsigned long PPS_TOLERANCE = 2000;            //  500us tolerance for PPS interval
 #define Timer_Milli 2000              // approx ticks per millisecond
 
 volatile unsigned long tk_pps_interval_total=0;         // sum of pps intervals
 volatile unsigned long tk_pps_interval_count=0;         // # of pps interval
 volatile unsigned long tk_pps_interval_ave=0;           // average pps interval
-
-#define SYNC_SECONDS 5                // # of seconds for syncing to GPS time
-volatile short int TimeSync;          // ( > 0 ) => we are syncing to GPS sentence times = # of seconds remaining for sync (small value so no problem with ints)
 
 // YY-MM-DD HH:MM:SS time of current second
 //   note: all values are less than 255 => don't need to protect individual changes from interrupts during read/write
@@ -231,6 +233,7 @@ const unsigned long gpsBaud = 9600;
 // PPS
 //
 volatile unsigned long tk_PPS;        // tick "time" of most recent PPS int
+volatile unsigned long tk_PPS_valid;  // time of last VALID PPS int
 volatile bool pps_now = false;        // true => PPS just happened
                                       
 
@@ -514,13 +517,14 @@ void loop() {
     //
     ReadGPS();
 
-    // compute average PPS every 10 seconds
+    // compute PPS stats
     //
     if ( tk_pps_interval_count == 10 )
     {
       noInterrupts();
       tk_pps_interval_ave = tk_pps_interval_total / tk_pps_interval_count;      // compute the average delay between PPS intervals
       Timer_Second = tk_pps_interval_ave;                                       // use this average as the new definition of a second
+      Timer_100us = Timer_Second / 10000;
       
       tk_pps_interval_total = 0;                                                // reset
       tk_pps_interval_count = 0;
@@ -768,7 +772,7 @@ VSYNC_ISR()
 
       // Top Row - Last PPS count (hex)
       //
-      ultohex(TopRow + 1, tk_PPS);
+      ultohex(TopRow + 1, tk_PPS_valid);
       
       // Top Row = update Field1/Field2 counts
       //
@@ -877,7 +881,7 @@ VSYNC_ISR()
       //  ** use "local" values saved at start of ISR to match state at that time
       //
       
-      tDiff = timeDiff / (Timer_Milli / 10);   // convert to 0.1ms for display
+      tDiff = timeDiff / Timer_100us;   // convert to 0.1ms for display
 
       // clear the bottom row up to the field count
       //
@@ -985,32 +989,99 @@ PPS_ISR()
   unsigned long timeDiff;
   unsigned long ppsDiff;
 
-  // get the HSYNC time from the input capture register
-  //   falling edge => start of Horizontal blanking
+  // get the PPS time
+  // 
   //
   timeCurrent = GetTicks(TCNT);
   
+  //*******************
+  //   if Programming, Init, or Fail , just leave
+  //
+  if ((CurrentMode == Programming) || (CurrentMode == InitMode) || (CurrentMode == FailMode))
+  {
+    return;
+  }
+
+  //************************************
+  //  Validate PPS interval
+  //    if too long or too short => Error Mode (PPS error)
+  //   
+
   // save the previous value for compare
   //
   timePrev = tk_PPS;
   tk_PPS = timeCurrent;
-  
-  // OK to enable ints
+
+  // delay from last PPS
   //
-  interrupts();
+  if (timeCurrent > timePrev)
+  {
+    timeDiff = timeCurrent - timePrev;
+  }
+  else
+  {
+    timeDiff = 0 - (timePrev - timeCurrent);
+  }
+  
+  // PPS interval between now and the last PPS
+  //   save this to be used by averaging code
+  //
+  ppsDiff = timeDiff;       
+  
+  // Check delay since last PPS pulse...
+  //  if too short or too long and we are not in WaitingForGPS mode
+  //      go to Error mode
+  //
+  if ( (timeDiff < (Timer_Second - PPS_TOLERANCE)) || (timeDiff > (Timer_Second + PPS_TOLERANCE)) && (CurrentMode != WaitingForGPS) )
+  {
+
+    // PPS issue!
+    //   set error mode and leave
+    //
+    CurrentMode = ErrorMode;
+
+    // clear the PPS interval average
+    //
+    tk_pps_interval_total = 0;
+    tk_pps_interval_count = 0;
+   
+    // write error message
+    //
+    for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
+    {
+      BottomRow[i] = 0x00;
+    }   
+    OSD.atomax(&BottomRow[1], (uint8_t*)msgNoPPS, len_msgNoPPS);
+    bytetodec2(BottomRow + len_msgNoPPS + 1,1);
+
+    // set error countdown
+    //
+    ErrorCountdown = ERROR_DISPLAY_SECONDS;
+    return;
+  }
+
+  // ***** PPS validated
+  //
+  tk_PPS_valid = tk_PPS;
+   
+  // rotation counter
+  //
+  osdRotation++;
+  if (osdRotation == 4)
+    osdRotation = 0;
 
   //  flag for "flash" on PPS
   //
   //
   pps_now = true;
 
-  //*******************
-  // What mode now?
-  //   if Programming, Init, or Fail , just leave
+ 
+  // OK to enable ints
   //
-  //  Validate PPS interval
-  //    if too long or too short => Error Mode (PPS error)
-  //   
+  interrupts();
+
+  //********************************
+  // Other Modes
   //  *Error Mode
   //    - If (error has displayed for two seconds)
   //        move to Waiting for GPS mode
@@ -1030,58 +1101,6 @@ PPS_ISR()
   //    - check for GPS/UTC switch
   //
   //
-  if ((CurrentMode == Programming) || (CurrentMode == InitMode) || (CurrentMode == FailMode))
-  {
-    return;
-  }
-  
-  // rotation counter
-  //
-  osdRotation++;
-  if (osdRotation == 4)
-    osdRotation = 0;
-
-  // delay from last PPS
-  //
-  if (timeCurrent > timePrev)
-  {
-    timeDiff = timeCurrent - timePrev;
-  }
-  else
-  {
-    timeDiff = 0 - (timePrev - timeCurrent);
-  }
-  ppsDiff = timeDiff;       // PPS interval between now and the last PPS
-  
-  // Check delay since last PPS pulse...
-  //  if too short or too long and we are not in WaitingForGPS mode
-  //      go to Error mode
-  //
-  if ( (timeDiff < (Timer_Second - PPS_TOLERANCE)) || (timeDiff > (Timer_Second + PPS_TOLERANCE)) && (CurrentMode != WaitingForGPS) )
-  {
-    CurrentMode = ErrorMode;
-
-    noInterrupts();                 // clear the ave interval computation
-    tk_pps_interval_total = 0;
-    tk_pps_interval_count = 0;
-    interrupts();
-    
-    // write error message
-    //
-    for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
-    {
-      BottomRow[i] = 0x00;
-    }   
-    OSD.atomax(&BottomRow[1], (uint8_t*)msgNoPPS, len_msgNoPPS);
-    bytetodec2(BottomRow + len_msgNoPPS + 1,1);
-
-    // set error countdown
-    //
-    ErrorCountdown = ERROR_DISPLAY_SECONDS;
-    
-  }
-
-  // Mode?
   //
   if ( CurrentMode == ErrorMode )
   {
@@ -1112,7 +1131,7 @@ PPS_ISR()
     // TimeValid Mode
     //
 
-    // update total delays
+    // update PPS interval statistics
     //
     tk_pps_interval_total += ppsDiff;
     tk_pps_interval_count++;
@@ -1306,7 +1325,16 @@ PPS_ISR()
     
     // update sync count & field count (already written)
     //
-    ultodec(&BottomRow[1 + len_msgSync + 1],(unsigned long)TimeSync,0);
+    ultodec(&BottomRow[1 + len_msgSync + 1],(unsigned long)TimeSync,2);
+
+    tk_pps_interval_total += ppsDiff;
+    tk_pps_interval_count++;
+#if (TESTROW == 1)
+    if (tk_pps_interval_ave != 0)
+    {
+      ultodec(&TestRow[1], tk_pps_interval_ave,10);
+    }
+#endif    
 
     // are we all done with the sync?
     //
@@ -1317,7 +1345,7 @@ PPS_ISR()
 
       // RMC time should correspond to the PREVIOUS second
       //
-      noInterrupts();       // protect internal time update ...
+      noInterrupts();       // protect volatiles from changing ...
       sec_ss = gpsRMC.ss;
       sec_mm = gpsRMC.mm;
       sec_hh = gpsRMC.hh;
@@ -1342,7 +1370,18 @@ PPS_ISR()
         }
         
       } // end of check for leap second status
-      interrupts();
+
+      // update PPS statistics
+      //
+      tk_pps_interval_ave = tk_pps_interval_total / tk_pps_interval_count;      // compute the average delay between PPS intervals
+      Timer_Second = tk_pps_interval_ave;                                       // use this average as the new definition of a second
+      Timer_100us = Timer_Second / 10000;
+      
+      tk_pps_interval_total = 0;                                                // reset
+      tk_pps_interval_count = 0;
+
+      
+      interrupts();     // int back on again
 
       // We now have a valid time base... 
       //
