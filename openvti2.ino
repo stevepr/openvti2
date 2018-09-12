@@ -15,7 +15,7 @@
 
 OpenVTI2
 
-This is VERSION 5 - reworked by SBP from Version 4 by MichaelF
+This is VERSION 6
 
 ChangeLog
 
@@ -36,11 +36,15 @@ Version 4
 - make display more sparse to provide more area for stars!
 
 Version 5
+- SBP (from original OpenVTI code by MichaelF)
 - interrupt driven PPS
 - update OSD during vertical blanking
 - write OSD update directly using auto-increment mode
 - added code for parsing GPS serial data
 - enabled  XXXX ublox proprietary sentence
+
+Version 6
+- moved to Mega2560 as required platform
 
 VTI for following setup:
 
@@ -73,7 +77,7 @@ I included zip files as well for original library
 #include "MAX7456.h"
 
 //  Global Settings ///////////////////////////////////////////////////////////////
-#define VERSION  5
+#define VERSION  6
 
 #define GRAYBACKGROUND 1    // == 1 => set gray background behind OSD lines
                             // == 0 => transparent background behind OSD lines
@@ -90,15 +94,16 @@ I included zip files as well for original library
 //
 enum CountSource
 {
-  TCNT,
-  ICR
+  CNT4,
+  CNT5,
+  CR4,
+  CR5
 };
 
 // Operating Modes
 //
 enum OperatingMode
 {
-  Programming,            // => GPS is disconnected and ready to accept programming from PC
   InitMode,               // => Power up initialization
   WaitingForGPS,          // => Waiting to receive valid GPS data
   Syncing,                // => Synchronizing internal time base with GPS data
@@ -200,7 +205,7 @@ volatile unsigned short osdRotation = 0;             // rotation counter for top
 //***********************
 //  Time
 //
-volatile unsigned short timer1_ov;                      // timer 1 overflow count = high word of "time" (32ms per overflow)
+volatile unsigned short timer4_ov;                      // timer 4 overflow count = high word of "time" (32ms per overflow)
 volatile unsigned long Timer_Second = 2000000;          // # of ticks for 1 second
 volatile unsigned long Timer_100us = 200;               // # of ticks for 100 microseconds
 volatile unsigned long PPS_TOLERANCE = 2000;            //  500us tolerance for PPS interval
@@ -236,11 +241,6 @@ volatile unsigned long tk_PPS;        // tick "time" of most recent PPS int
 volatile unsigned long tk_PPS_valid;  // time of last VALID PPS int
 volatile bool pps_now = false;        // true => PPS just happened
                                       
-
-volatile int pps_HH;                  //  current pps time (HH:MM:SS)
-volatile int pps_MM;
-volatile int pps_SS;
-
 // GPS serial data
 //
 
@@ -309,25 +309,9 @@ void setup() {
   uint8_t rows;
   uint8_t cols;    
   
-  //**************
-  //  check startup mode
-  //
-  STARTUP_CFG_INPUT();
-  if (STARTUP_READ())
-  {
-    CurrentMode = InitMode;
-  }
-  else
-  {
-    // just programming - leave now
-    CurrentMode = Programming;
-    return;
-  }
-
   //************
   //  General init
   //
-  
   EnableOverlay = false;      // turn off overlay update for now...
   fieldTotal = 0;
   for (int i = 0; i< 30; i++) 
@@ -335,6 +319,14 @@ void setup() {
     TopRow[i] = 0x00;
     BottomRow[i] = 0x00;
   }
+
+  // set D10 - D13 to input since the TinySine shield connects them to the SPI lines of the Mega
+  //      this is the default startup state but it doesn't hurt to make sure
+  //
+  pinMode(10,INPUT);
+  pinMode(11,INPUT);
+  pinMode(12,INPUT);
+  pinMode(13,INPUT);
 
   //*****************
   //  Delay to allow startup time for external devices
@@ -441,58 +433,82 @@ void setup() {
   
   OSD.display();                              // Activate the text display.
 
-  //*************************
-  //  setup Timer 1 first
-  //    * this is our time base
-  //    2hmz time clock
-  //
-  TIMSK1 = 0;                               // disable all timer 1 ints
-  TCCR1A = 0;                               // normal mode
-  TCCR1B = (1 << CS11);                     // 2mhz
-  TCCR1C = 0;                               // normal mode
-  
-  TCNT1 = 0;                                // reset count
-  TIFR1 = 0;                                // reset any pending ints
-  timer1_ov = 0;                            // reset overflow count
-
-  TIMSK1 = (1 << TOIE1);                    // enable overflow int only (for now)
-  PRR &= ~(1 << PRTIM1);                    // turn on timer 1
-  
-
-  //*************
-  // setup input sources
-  //  * PPS
-  //  * VSYNC
-  //  * HSYNC
-  //  
-
-  // PPS
-  // Connected to INT1 interrupt as rising edge trigger
-  //
-  PPS_CFG_INPUT();
-  PPS_CFG_EICRA();
-  PPS_CFG_PCMSK();
-  PPS_CFG_EIMSK(); 
-  
-  // HSYNC
+  //*****************  
+  // HSYNC input
   //  no interrupt - just polled as an input
   //
   HSYNC_CFG_INPUT();
-   
-  // VSYNC - setup as falling edge ICP interrupt
-  //
-  tk_VSYNC = 0;
-  VSYNC_CFG_INPUT();
 
-  TCCR1B &= ~(1 << ICES1);                  // falling edge trigger for VSYNC (start of horizontal blanking)
-  TIMSK1 |= (1 << ICIE1);                   // enable ICP interrupt
+  //**********************
+  //  Init timers for input capture and timing
+  //    Timer 4 - 1pps
+  //    Timer 5 - VSYNC
+  //  * get them setup with Mask OFF to prevent interrupts until we are ready
+  //
+
+
+  //  PPS : Timer 4 - used to capture times of 1pps interrrupts
+  //    ICP4 pin (digital 49) set to input
+  //    Normal mode
+  //    Prescaler = f/8
+  //    Input Capture = edge detect
+  //    MASK OFF ints for now
+  //
+  pinMode(49,INPUT);                    // ICP4 = pin 49 as input
+  
+  TIMSK4 = 0;                             // mask off all interrupts for now
+  TCCR4A = 0;                             // all OC ports off and normal mode
+  TCCR4B = (1 << ICES4) | (1 << CS41);    // positive edge trigger IC & f/8 prescaler
+  PRR1 &= ~(1 << PRTIM4);                 // turn OFF power reduction for timer 4 => turn it ON!
+  
+  //  VSYNC : Timer 5 - VSYNC times
+  //    ICP5 pin (digital 48) set to input
+  //    Normal mode
+  //    Prescaler = f/8
+  //    Input Capture = edge detect AND noise canceller ON
+  //     note: since timer5 is sync'd to timer4, we will use the same overflow counter for both => no overflow int for timer5
+  //    MASK OFF ints for now
+  //
+  pinMode(48,INPUT);                    // ICP5 = pin 48 as input
+  
+  TIMSK5 = 0;                             // mask off all interrupts for now
+  TCCR5A = 0;                             // all OC ports off and normal mode
+  TCCR5B = (1 << ICNC5) | (1 << ICES5) | (1 << CS51);    // noise cancel on, positive edge trigger IC & f/8 prescaler
+  PRR1 &= ~(1 << PRTIM5);                 // turn OFF power reduction for timer 5 => turn it ON!
+
+  
+  //  SYNC all synchronous timers via Prescaler reset
+  //    MASK ON => start input captures
+  //
+  GTCCR = (1 << TSM) | (1 << PSRSYNC);    // STOP prescaler and all syncronous timers
+
+  TCNT4 = 0;        // timer4: reset count
+  TIFR4 = 0;        // timer4: reset all pending interrupts
+  TIMSK4 = (1 << ICIE4) | (1 << TOIE4);   // timer 4: turn on IC capture and overflow interrupts
+
+  // VSYNC ...
+  //
+  tk_VSYNC = 0;     // ok ... ready for vsync interrupts now
+  
+  TCNT5 = 0;        // timer5: reset count
+  TIFR5 = 0;        // timer5: reset all pending interrupts
+  TIMSK5 = (1 << ICIE5);   // timer 5: turn on IC capture and NO overfloww interrupts
+
+  timer4_ov = 0;    // timer4: reser overflow count (used for timer5 overflow as well)
+  GTCCR = 0;    // RESTART prescaler and all synchronous timers => Timer4 and Timer5 are now sync'd
 
   //*********************
-  //  OK, startup the regular cycle 
-  //    * start by looking for GPS NMEA and PPS to get in sync
+  //  VSYNC in now happening
+  //   The VSYNC ISR will try to detect the field order on this first VSYNC
   //
-  CurrentMode = WaitingForGPS;        // Now waiting for the GPS data to begin synchronizing
-  // write message
+
+  //*********************
+  //  OK, startup the regular timing operation
+  //    * WaitingForGPS mode = start by looking for GPS NMEA and PPS to get in sync
+  //
+  time_UTC = false;     // assume NOT UTC for now...
+  
+  // waiting for GPS message
   //
   for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
   {
@@ -500,8 +516,11 @@ void setup() {
   }   
   OSD.atomax(&BottomRow[1], (uint8_t*)msgWaiting, len_msgWaiting);
   
-  time_UTC = false;
-  EnableOverlay = true;   // start the overlay...
+  CurrentMode = WaitingForGPS;        // set mode
+
+  // start the overlay
+  //
+  EnableOverlay = true;
  
 } // end of setup
 
@@ -540,7 +559,7 @@ void loop() {
 //*****************************************************************************************
 
 //===============================
-//  VSYNC ISR
+//  VSYNC ISR = ICP5
 //===============================
 VSYNC_ISR()
 {
@@ -568,7 +587,7 @@ VSYNC_ISR()
     
     // get the ICR time for the start of VSYNC
     //
-    tk_VSYNC = GetTicks(ICR);
+    tk_VSYNC = GetTicks(CR5);
 
     // just set the parity based on last field
     //
@@ -589,11 +608,11 @@ VSYNC_ISR()
   
     // now get the current time as the falling edge of HSYNC
     //
-    tk_HSYNC = GetTicks(TCNT);
+    tk_HSYNC = GetTicks(CNT5);
   
     // and get the ICR time for the start of VSYNC
     //
-    tk_VSYNC = GetTicks(ICR);
+    tk_VSYNC = GetTicks(CR5);
   
     // determine time to nearest HSYNC
     //   During field 1, HSYNC should occur near VSYNC
@@ -654,8 +673,6 @@ VSYNC_ISR()
   //*************************************************
   //  Update local display lines based on CurrentMode
   //
-  //    * Programming Mode
-  //        - Shouldn't be here but just return anyway
   //
   //    * InitMode
   //      - No display during this mode so just return
@@ -668,7 +685,7 @@ VSYNC_ISR()
   //      - error checking
   //      - update overlay
   //
-  if ((CurrentMode == Programming) || (CurrentMode == InitMode))
+  if (CurrentMode == InitMode)
   {
     return;     // leave now => don't update the display
   }
@@ -980,7 +997,7 @@ VSYNC_ISR()
 } // end of VSYNC_ISR
 
 //===============================
-//  PPS ISR
+//  PPS ISR = ICP4
 //===============================
 PPS_ISR()
 {
@@ -992,12 +1009,12 @@ PPS_ISR()
   // get the PPS time
   // 
   //
-  timeCurrent = GetTicks(TCNT);
+  timeCurrent = GetTicks(CR4);
   
   //*******************
-  //   if Programming, Init, or Fail , just leave
+  //   if Init, or Fail , just leave
   //
-  if ((CurrentMode == Programming) || (CurrentMode == InitMode) || (CurrentMode == FailMode))
+  if ( (CurrentMode == InitMode) || (CurrentMode == FailMode))
   {
     return;
   }
@@ -1413,35 +1430,48 @@ PPS_ISR()
 } // end of PPS_ISR
 
 //========================================
-// ISR for Timer 1 overflow
+// ISR for Timer 4 overflow
 //=========================================
-ISR( TIMER1_OVF_vect)
+ISR( TIMER4_OVF_vect)
 {
   
-  timer1_ov++;   // just increment overflow count
+  timer4_ov++;   // just increment overflow count
   
 } // end of Timer1 overflow vector
 
 //========================================
-// GetTicks() - get timer tick count from either TCNT or ICP
+// GetTicks() - get timer tick count from either TCNT4, TCNT5, ICP4 or ICP5
 //    *** call with interrupts OFF
+//    *** CNT4 & CNT5 should return the same value (timers are sync'd)
 //=========================================
 unsigned long GetTicks(CountSource src)
 {
   unsigned long tickCount;
 
-  if (src == TCNT)
+  if (src == CNT4)
   {
-    tickCount = ((unsigned long)timer1_ov << 16) + (unsigned long)TCNT1;
+    tickCount = ((unsigned long)timer4_ov << 16) + (unsigned long)TCNT4;
+  }
+  else if (src == CNT5)
+  {
+    tickCount = ((unsigned long)timer4_ov << 16) + (unsigned long)TCNT5;
+  }
+  else if (src == CR4)
+  {
+    tickCount = ((unsigned long)timer4_ov << 16) + (unsigned long)ICR4;
+  }
+  else if (src == CR5)
+  {
+    tickCount = ((unsigned long)timer4_ov << 16) + (unsigned long)ICR5;
   }
   else
   {
-    tickCount = ((unsigned long)timer1_ov << 16) + (unsigned long)ICR1;
+    tickCount = 0;    // ** should be an ERROR!
   }
   
   // watch for overflow pending
   //
-  if ( TIFR1 & (1 << TOV1) )
+  if ( TIFR4 & (1 << TOV4) )
   {
     // overflow pending
     //  ignore it if the counter number is close to overflow
@@ -1518,7 +1548,7 @@ void SecDec()
 //**********************************************************************************************************
 // NEO 6 GPS routines
 //**********************************************************************************************************
-#define gpsSerial Serial
+#define gpsSerial Serial1
 #define gps_OK        0
 #define gps_E_RMC     1
 #define gps_E_GGA     2
@@ -1846,7 +1876,7 @@ bool ReadGPS()
       // start of a sentence
       //
       noInterrupts();
-      tk_NMEAStart = GetTicks(TCNT);
+      tk_NMEAStart = GetTicks(CNT4);
       interrupts();
       
       // save the current hh:mm:ss time
