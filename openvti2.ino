@@ -162,8 +162,10 @@ uint8_t TestRow[30];
 
 // location of UI elements
 //
-#define TOP_ROW_NTSC 11
-#define BOTTOM_ROW_NTSC  12
+//#define TOP_ROW_NTSC 11
+//#define BOTTOM_ROW_NTSC  12
+#define TOP_ROW_NTSC 9
+#define BOTTOM_ROW_NTSC  10
 #define TOP_ROW_PAL 14
 #define BOTTOM_ROW_PAL 15
 
@@ -207,7 +209,7 @@ volatile unsigned short osdRotation = 0;             // rotation counter for top
 //
 volatile unsigned short timer4_ov;                      // timer 4 overflow count = high word of "time" (32ms per overflow)
 volatile unsigned long Timer_Second = 2000000;          // # of ticks for 1 second
-volatile unsigned long Timer_100us = 200;               // # of ticks for 100 microseconds
+volatile unsigned long Timer_100ms = 200000;            // ticks / 100ms
 volatile unsigned long PPS_TOLERANCE = 2000;            //  500us tolerance for PPS interval
 #define Timer_Milli 2000              // approx ticks per millisecond
 
@@ -543,7 +545,7 @@ void loop() {
       noInterrupts();
       tk_pps_interval_ave = tk_pps_interval_total / tk_pps_interval_count;      // compute the average delay between PPS intervals
       Timer_Second = tk_pps_interval_ave;                                       // use this average as the new definition of a second
-      Timer_100us = Timer_Second / 10000;
+      Timer_100ms = Timer_Second / 10;
       
       tk_pps_interval_total = 0;                                                // reset
       tk_pps_interval_count = 0;
@@ -897,8 +899,11 @@ VSYNC_ISR()
       // OSD Bottom Row ...
       //  ** use "local" values saved at start of ISR to match state at that time
       //
-      
-      tDiff = timeDiff / Timer_100us;   // convert to 0.1ms for display
+
+      // compute time since PPS in 0.1ms intervals
+      //
+      tDiff = timeDiff * 1000;           // upcoonvert to avoid loss of precision in next divide
+      tDiff = tDiff / Timer_100ms;       // time difference in 0.1ms intervals
 
       // clear the bottom row up to the field count
       //
@@ -1392,7 +1397,7 @@ PPS_ISR()
       //
       tk_pps_interval_ave = tk_pps_interval_total / tk_pps_interval_count;      // compute the average delay between PPS intervals
       Timer_Second = tk_pps_interval_ave;                                       // use this average as the new definition of a second
-      Timer_100us = Timer_Second / 10000;
+      Timer_100ms = Timer_Second / 10;
       
       tk_pps_interval_total = 0;                                                // reset
       tk_pps_interval_count = 0;
