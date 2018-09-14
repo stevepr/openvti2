@@ -138,6 +138,11 @@ char msgUnknownError[] = "*FATAL ERROR*";
 char msgErrorCodes[] = "   ";
 #define len_msgErrorCodes 3
 
+// Command string from the PC
+//
+#define CommandSize 30            // max size of a command string 
+char strCommand[ CommandSize + 1 ];
+int Cmd_Next;                     // speed optimization ( -1 => full command pending )
 
 //***************
 // OSD info
@@ -162,10 +167,8 @@ uint8_t TestRow[30];
 
 // location of UI elements
 //
-//#define TOP_ROW_NTSC 11
-//#define BOTTOM_ROW_NTSC  12
-#define TOP_ROW_NTSC 9
-#define BOTTOM_ROW_NTSC  10
+#define TOP_ROW_NTSC 11
+#define BOTTOM_ROW_NTSC  12
 #define TOP_ROW_PAL 14
 #define BOTTOM_ROW_PAL 15
 
@@ -303,6 +306,14 @@ struct {
   uint8_t cLeap[3];       // leap seconds field from sentence
 } gpsPUBX04;
 
+volatile bool blnEchoPPS = false;
+char msgEchoPPS[] = "<P>TTTTTTTT</P>";
+#define len_msgEchoPPS 15
+
+volatile bool blnEchoVSYNC = false;
+char msgEchoVSYNC[] = "<V>TTTTTTTT</V>";
+#define len_msgEchoVSYNC 15
+
 
 //========================================
 //  SETUP ROUTINE
@@ -322,6 +333,11 @@ void setup() {
     BottomRow[i] = 0x00;
   }
 
+  for (int i = 0; i < CommandSize; i++)
+  {
+    strCommand[i] = ' ';
+  }
+  
   // set D10 - D13 to input since the TinySine shield connects them to the SPI lines of the Mega
   //      this is the default startup state but it doesn't hurt to make sure
   //
@@ -329,6 +345,11 @@ void setup() {
   pinMode(11,INPUT);
   pinMode(12,INPUT);
   pinMode(13,INPUT);
+
+  // connect to USB port at 115200 so we send data quickly
+  //
+  //
+  Serial.begin(115200);
 
   //*****************
   //  Delay to allow startup time for external devices
@@ -501,16 +522,17 @@ void setup() {
 
   //*********************
   //  VSYNC in now happening
-  //   The VSYNC ISR will try to detect the field order on this first VSYNC
+  //   Tell the VSYNC ISR to try to detect the field order on this first VSYNC
   //
-
+  fieldParity = 0;
+  
   //*********************
   //  OK, startup the regular timing operation
   //    * WaitingForGPS mode = start by looking for GPS NMEA and PPS to get in sync
   //
   time_UTC = false;     // assume NOT UTC for now...
   
-  // waiting for GPS message
+  // "Waiting for GPS" mode
   //
   for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
   {
@@ -520,6 +542,16 @@ void setup() {
   
   CurrentMode = WaitingForGPS;        // set mode
 
+  // reset command stream from PC
+  //     clear incomming data buffer from PC
+  //
+  while( Serial.available() )
+  {
+    Serial.read();
+  }
+  strCommand[0] = 0;  // no command
+  Cmd_Next = 0;
+
   // start the overlay
   //
   EnableOverlay = true;
@@ -528,8 +560,14 @@ void setup() {
 
 //========================================
 // LOOP ROUTINE
+//
+//    - ReadGPS data (and echo)
+//    - Read command data from USB port
+//    - if command found, do it
+//
 //========================================
-void loop() {
+void loop() 
+{
 
   while (true)
   {
@@ -551,10 +589,127 @@ void loop() {
       tk_pps_interval_count = 0;
       interrupts();
     }
+
+    // Read any pending command data from USB port
+    //
+    ReadCMD();
+
+    // Execute pending command
+    //
+    if (Cmd_Next < 0)
+    {
+      
+      ExecCMD();
+    } // end of executing commands
     
   } // end of loop
 
 } // end of loop()
+
+//=====================================
+//  ReadCMD - get pending command data from USB port
+//    set CMD_Next = -1 when full command line available
+//
+//======================================
+void ReadCMD()
+{
+
+  byte bIn;
+  
+  // read command from PC
+  //  - one byte at a time
+  //  - command terminates with a Newline char (\n)
+  //
+  while ( Serial.available() > 0 )
+  {
+    // was a command pending?
+    //
+    if (Cmd_Next < 0)
+    {
+      Cmd_Next = 0;     // not any more...
+    }
+    else if (Cmd_Next >= CommandSize)
+    {
+      // ran out of room => error
+      //
+      Cmd_Next = 0;   // reset to new command
+    }
+      
+    // ok -> get the character & save it
+    //   but don't save CR or LF
+    //
+    bIn = Serial.read();
+      
+    // if \n, terminate command line and don't save the \n
+    //
+    if (bIn == '\n')
+    {
+      strCommand[Cmd_Next] = 0;
+      Cmd_Next = -1;
+      break;
+    }
+    else if (bIn != '\r')
+    {
+      // here if NOT \r or \n
+      //
+      strCommand[ Cmd_Next ] = bIn;
+      Cmd_Next++;
+    }
+    // if \r, do nothing with char
+    
+  } // end of loop reading incoming data
+  
+} // end of ReadCMD
+
+//=====================================
+//  ExecCMD - execute command from USB port
+//
+//======================================
+void ExecCMD()
+{
+#if (TESTROW == 1)
+      OSD.atomax(&TestRow[1], (uint8_t*)strCommand, 10);
+#endif
+  // parse the command and do it
+  //  PPS ON => turn on PPS echo
+  //  PPS OFF => turn off PPS echo
+  //  VSYNC ON => turn on VSYNC echo
+  //  VSYNC OFF => turn off VSYNC echo
+  //
+  if (strncmp(strCommand,"PPS ",4) == 0)
+  {
+    if (strncmp(strCommand + 4,"ON",2) == 0)
+    {
+      blnEchoPPS = true;
+    }
+    if (strncmp(strCommand + 4,"OFF",3) == 0)
+    {
+      blnEchoPPS = false;
+    }
+    // else ... do nothing
+  }
+  else if (strncmp(strCommand,"VSYNC ",6) == 0)
+  {
+    if (strncmp(strCommand + 6,"ON",2) == 0)
+    {
+      blnEchoVSYNC = true;
+    }
+    if (strncmp(strCommand + 6,"OFF",3) == 0)
+    {
+      blnEchoVSYNC = false;
+    }
+    // else ... do nothing
+  }
+  // else ... didn't recognize the command ... do nothing
+
+  // reset / clear command
+  //
+  Cmd_Next = 0;
+
+  // all done
+  //
+  
+} // end of ExecCMD
 
 //*****************************************************************************************
 // ISR routines
@@ -649,6 +804,18 @@ VSYNC_ISR()
     }
     
   } // end of fieldParity detection
+
+  //**********************
+  //  echo VSYNC time to USB port
+  //
+  if (blnEchoVSYNC)
+  {
+    ultohexA((uint8_t *)msgEchoVSYNC + 3, tk_VSYNC);
+    for (int i = 0; i < len_msgEchoVSYNC; i++)
+    {
+      Serial.write(msgEchoVSYNC[i]);
+    }
+  }
 
   //************************
   // increment field count
@@ -1024,6 +1191,19 @@ PPS_ISR()
     return;
   }
 
+  //**********************
+  //  echo PPS time to USB port
+  //
+  if (blnEchoPPS)
+  {
+    ultohexA((uint8_t *)msgEchoPPS + 3, timeCurrent);
+    for (int i = 0; i < len_msgEchoPPS; i++)
+    {
+      Serial.write(msgEchoPPS[i]);
+    }
+  }
+  
+
   //************************************
   //  Validate PPS interval
   //    if too long or too short => Error Mode (PPS error)
@@ -1157,12 +1337,6 @@ PPS_ISR()
     //
     tk_pps_interval_total += ppsDiff;
     tk_pps_interval_count++;
-#if (TESTROW == 1)
-    if (tk_pps_interval_ave != 0)
-    {
-      ultodec(&TestRow[1], tk_pps_interval_ave,10);
-    }
-#endif    
 
     // check for switch from GPS to UTC time
     //
@@ -1873,6 +2047,10 @@ bool ReadGPS()
     //
     c = gpsSerial.read();
 
+    // echo it to the USB port
+    //
+    Serial.write(c);
+
     // Watch for beginning/ending of a sentence
     //
 
@@ -2020,11 +2198,6 @@ bool ReadGPS()
             //
             if (ErrorFound > 0)
             {
-#if (TESTROW == 1)
-             ultodec(TestRow + 1, offsetUTC_Default, 6);  // write tick count
-             ultodec(TestRow + 10, internalSec, 8);  // write tick count
-             ultodec(TestRow + 20, ubxSec, 8);  // write tick count
-#endif              
               CurrentMode = ErrorMode;
               ErrorCountdown = ERROR_DISPLAY_SECONDS;
 
@@ -2640,6 +2813,37 @@ void ultohex(uint8_t *dest, unsigned long ul)
     //
     nibble = (ul & 0xF);
     *pn = hex[nibble];
+
+    // move to next nibble
+    //
+    ul = ul >> 4;
+    pn--;
+    
+  } // end of for loop through the nibbles
+  
+} // end of ultohex
+
+//===========================================================================
+// ultohexA - convert unsigned long to 8 hex ASCII characters in a character array
+//
+//===========================================================================
+uint8_t hexA[16] = {0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39,0x41,0x42,0x43,0x44,0x45,0x46};
+void ultohexA(uint8_t *dest, unsigned long ul)
+{
+
+
+  uint8_t *pn;
+  unsigned long nibble;
+
+  pn= dest + 7;
+  
+  for(int i = 0; i < 8; i++)
+  {
+
+    // get nibble 
+    //
+    nibble = (ul & 0xF);
+    *pn = hexA[nibble];
 
     // move to next nibble
     //
