@@ -75,6 +75,7 @@ I included zip files as well for original library
 #include "pinconfig.h"
 #include <SPI.h>
 #include "MAX7456.h"
+#include <util/crc16.h>
 
 //  Global Settings ///////////////////////////////////////////////////////////////
 #define VERSION  6
@@ -88,6 +89,11 @@ I included zip files as well for original library
 
 // Global Constants & Variables ////////////////////////////////////////////////////////////
 //
+
+// CRC data
+//
+uint32_t ProgramLength = 0x3000;
+uint16_t pgmCRC = 0;
 
 //*********************************
 //  General state info
@@ -337,6 +343,10 @@ void setup() {
   {
     strCommand[i] = ' ';
   }
+
+  // caculate CRC of some program memory
+  //
+  pgmCRC = getFlashCRC(ProgramLength);
   
   // set D10 - D13 to input since the TinySine shield connects them to the SPI lines of the Mega
   //      this is the default startup state but it doesn't hurt to make sure
@@ -1048,13 +1058,17 @@ VSYNC_ISR()
           TopRow[4] = 0x41;   // '.'
           TopRow[5] = 0x0A;   // 0
 
+          // CRC
+          //
+          ustohex(TopRow + 7, pgmCRC);
+
           // error codes
           //
-          OSD.atomax(TopRow + 7, (uint8_t*) msgErrorCodes, len_msgErrorCodes);
+          OSD.atomax(TopRow + 12, (uint8_t*) msgErrorCodes, len_msgErrorCodes);
 
           // leap seconds
           //
-          OSD.atomax(TopRow + 15, gpsPUBX04.cLeap, 3);
+          OSD.atomax(TopRow + 20, gpsPUBX04.cLeap, 3);
           
           break;
 
@@ -2855,6 +2869,36 @@ void ultohexA(uint8_t *dest, unsigned long ul)
 } // end of ultohex
 
 //===========================================================================
+// ustohex - convert unsigned short to 4 hex MAX7456 characters in a character array
+//
+//===========================================================================
+void ustohex(uint8_t *dest, unsigned short us)
+{
+
+
+  uint8_t *pn;
+  unsigned short nibble;
+
+  pn= dest + 3;
+  
+  for(int i = 0; i < 4; i++)
+  {
+
+    // get nibble 
+    //
+    nibble = (us & 0xF);
+    *pn = hex[nibble];
+
+    // move to next nibble
+    //
+    us = us >> 4;
+    pn--;
+    
+  } // end of for loop through the nibbles
+  
+} // end of ustohex
+
+//===========================================================================
 // bytetohex - convert byte to 2 hex MAX7456 characters in a character array
 //
 //===========================================================================
@@ -3036,4 +3080,27 @@ int d2i(uint8_t *src)
     return val;
     
 } // end of atob2
+
+//================================================================
+//  getFlashCRC
+//   - compute CRC code for all program memory up to the specified last address
+//================================================================
+uint16_t getFlashCRC( uint32_t lastAddr )
+{
+  uint32_t addr;
+  uint8_t  byte_u8;
+  uint16_t crc_u16;
+
+
+  /* Compute the CRC */
+  crc_u16 = 0;
+  for( addr = 0; addr < lastAddr; addr++)
+  {
+    byte_u8 = pgm_read_byte_far( addr );
+    crc_u16 = _crc16_update( crc_u16, byte_u8 );
+  }
+
+  return( crc_u16 );
+
+} // end of getFlashCRC
 
