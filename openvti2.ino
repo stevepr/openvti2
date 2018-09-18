@@ -84,7 +84,7 @@ I included zip files as well for original library
                             // == 0 => transparent background behind OSD lines
 
 
-#define TESTROW 1           // == 1 => enable third row at top of display for testing/debug
+#define TESTROW 0           // == 1 => enable third row at top of display for testing/debug
                             // == 0 =>  no third row...
 
 // Global Constants & Variables ////////////////////////////////////////////////////////////

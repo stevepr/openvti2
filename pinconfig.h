@@ -45,8 +45,8 @@
   // GPS GND                         <-->  Arduino  GND
   // GPS PPS [3.3v] [INPUT]          --->  Arduino  49   [ICP4] 
   //  
-  // GPS TXD [3.3v]                  --->  Arduino  0   [RXD, PD0]
-  // GPS RXD [3.3v]                  <---  Arduino  1   [TXD, PD1] 
+  // GPS TXD [3.3v]                  --->  Arduino  19   [RX1, PD2]
+  // GPS RXD [3.3v]                  <---  Arduino  18   [TX1, PD3] 
 
 /////////////////////////  defines for init and access /////////////////////////
 
