@@ -313,13 +313,14 @@ struct {
 } gpsPUBX04;
 
 volatile bool blnEchoPPS = false;
-char msgEchoPPS[] = "<P>TTTTTTTT</P>";
-#define len_msgEchoPPS 15
+char msgEchoPPS[] = "<P>TTTTTTTT</P>\n";
+#define len_msgEchoPPS 16
 
 volatile bool blnEchoVSYNC = false;
-char msgEchoVSYNC[] = "<V>TTTTTTTT</V>";
-#define len_msgEchoVSYNC 15
+char msgEchoVSYNC[] = "<V>TTTTTTTT</V>\n";
+#define len_msgEchoVSYNC 16
 
+volatile bool blnEchoNMEA = true;
 
 //========================================
 //  SETUP ROUTINE
@@ -682,9 +683,11 @@ void ExecCMD()
 #endif
   // parse the command and do it
   //  PPS ON => turn on PPS echo
-  //  PPS OFF => turn off PPS echo
+  //  PPS OFF => turn off PPS echo (default)
   //  VSYNC ON => turn on VSYNC echo
-  //  VSYNC OFF => turn off VSYNC echo
+  //  VSYNC OFF => turn off VSYNC echo (default)
+  //  NMEA ON => echo NMEA sentences (default)
+  //  NMEA OFF => do NOT echo NMEA sentences
   //
   if (strncmp(strCommand,"PPS ",4) == 0)
   {
@@ -707,6 +710,18 @@ void ExecCMD()
     if (strncmp(strCommand + 6,"OFF",3) == 0)
     {
       blnEchoVSYNC = false;
+    }
+    // else ... do nothing
+  }
+  else if (strncmp(strCommand,"NMEA ",5) == 0)
+  {
+    if (strncmp(strCommand + 5,"ON",2) == 0)
+    {
+      blnEchoNMEA = true;
+    }
+    if (strncmp(strCommand + 5,"OFF",3) == 0)
+    {
+      blnEchoNMEA = false;
     }
     // else ... do nothing
   }
@@ -2063,8 +2078,10 @@ bool ReadGPS()
 
     // echo it to the USB port
     //
-    Serial.write(c);
-
+    if (blnEchoNMEA)
+    {
+      Serial.write(c);
+    }
     // Watch for beginning/ending of a sentence
     //
 
