@@ -144,6 +144,15 @@ char msgUnknownError[] = "*FATAL ERROR*";
 char msgErrorCodes[] = "   ";
 #define len_msgErrorCodes 3
 
+// Sync Errors
+//  1 = neither RMC nor PUBX04 is good
+//  2 = RMC seconds does not match internal time
+//  3 = RMC mode delay is neither A nor D
+//  4 = RMC time delay != PPS time
+//  5 = PUBX04 time != PPS time
+//  6 = error transitioning from GPS time to UTC time
+
+
 // Command string from the PC
 //
 #define CommandSize 30            // max size of a command string 
@@ -332,6 +341,7 @@ void setup() {
   //************
   //  General init
   //
+  CurrentMode = InitMode;
   EnableOverlay = false;      // turn off overlay update for now...
   fieldTotal = 0;
   for (int i = 0; i< 30; i++) 
@@ -1383,6 +1393,37 @@ PPS_ISR()
         {
           SecDec();            
         }
+
+        // now verify that this time matches the values from the previous RMC sentence (which should now be UTC)
+        //
+        noInterrupts();     // protect hh:mm:ss check
+        if ((gpsRMC.hh != sec_hh) || (gpsRMC.mm != sec_mm) || (gpsRMC.ss != sec_ss))
+        {
+          // Opps! the internal UTC time does not match the RMC values... display error and start over again with a new SYNC
+          //
+          ErrorFound = 6;
+          CurrentMode = ErrorMode;
+          ErrorCountdown = ERROR_DISPLAY_SECONDS;
+    
+          tk_pps_interval_total = 0;
+          tk_pps_interval_count = 0;
+          
+          // Error message
+          //
+          for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
+          {
+            BottomRow[i] = 0x00;
+          }   
+          OSD.atomax(&BottomRow[1],(uint8_t*)msgSyncFailed,len_msgSyncFailed);
+          bytetodec2(BottomRow + len_msgSyncFailed + 2,(byte)ErrorFound);
+          
+          interrupts();
+          return;
+        }
+        interrupts();          
+
+        // set flag to indicate we are now on UTC time
+        //
         time_UTC = true;      // UTC now
       }
     }
@@ -1539,7 +1580,7 @@ PPS_ISR()
         BottomRow[i] = 0x00;
       }   
       OSD.atomax(&BottomRow[1],(uint8_t*)msgSyncFailed,len_msgSyncFailed);
-      bytetodec2(BottomRow + len_msgSyncFailed + 2,(byte)ErrorFound + 3);
+      bytetodec2(BottomRow + len_msgSyncFailed + 2,(byte)ErrorFound);
       return;
     }
     
@@ -2243,7 +2284,7 @@ bool ReadGPS()
               {
                 BottomRow[i] = 0x00;
               }   
-              OSD.atomax(&BottomRow[1],(uint8_t*)msgNoPPS,len_msgSyncFailed);
+              OSD.atomax(&BottomRow[1],(uint8_t*)msgNoPPS,len_msgNoPPS);
               bytetodec2(BottomRow + len_msgNoPPS + 2,(byte)ErrorFound);
             }
               
