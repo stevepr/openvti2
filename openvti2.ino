@@ -840,18 +840,6 @@ VSYNC_ISR()
     
   } // end of fieldParity detection
 
-  //**********************
-  //  echo VSYNC time to USB port
-  //
-  if (blnEchoVSYNC)
-  {
-    ultohexA((uint8_t *)msgEchoVSYNC + 3, tk_VSYNC);
-    for (int i = 0; i < len_msgEchoVSYNC; i++)
-    {
-      Serial.write(msgEchoVSYNC[i]);
-    }
-  }
-
   //************************
   // increment field count
   //  - interrupts are OFF - ok to update the value
@@ -1203,6 +1191,18 @@ VSYNC_ISR()
     OSD.sendArray(5*30,TestRow,30); // testing...
     #endif
     
+  }
+
+  //**********************
+  //  lastly - optionally echo VSYNC time to USB port
+  //
+  if (blnEchoVSYNC)
+  {
+    ultohexA((uint8_t *)msgEchoVSYNC + 3, tk_VSYNC);
+    for (int i = 0; i < len_msgEchoVSYNC; i++)
+    {
+      Serial.write(msgEchoVSYNC[i]);
+    }
   }
 
 } // end of VSYNC_ISR
