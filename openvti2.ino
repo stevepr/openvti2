@@ -163,6 +163,7 @@ int Cmd_Next;                     // speed optimization ( -1 => full command pen
 // OSD info
 //
 volatile bool EnableOverlay = false;      // update Overlay?
+volatile bool blnSingleLineTest = false;  // true => display Bottom line ONLY in the TOP position (to allow another time stamp below).
 
 // OSD object
 //
@@ -698,6 +699,8 @@ void ExecCMD()
   //  VSYNC OFF => turn off VSYNC echo (default)
   //  NMEA ON => echo NMEA sentences (default)
   //  NMEA OFF => do NOT echo NMEA sentences
+  //  SLT ON => turn ON single line test mode
+  //  SLT OFF => turn OFF single line test mode
   //
   if (strncmp(strCommand,"PPS ",4) == 0)
   {
@@ -732,6 +735,18 @@ void ExecCMD()
     if (strncmp(strCommand + 5,"OFF",3) == 0)
     {
       blnEchoNMEA = false;
+    }
+    // else ... do nothing
+  }
+  else if (strncmp(strCommand,"SLT ",4) == 0)
+  {
+    if (strncmp(strCommand + 4,"ON",2) == 0)
+    {
+      blnSingleLineTest = true;
+    }
+    if (strncmp(strCommand + 4,"OFF",3) == 0)
+    {
+      blnSingleLineTest = false;
     }
     // else ... do nothing
   }
@@ -850,12 +865,25 @@ VSYNC_ISR()
     fieldTotal = 0;
 
   //*********************
-  //  BEFORE enabling interrupts - save current time seconds in local variables to match time of VSYNC pulse
+  //  BEFORE enabling interrupts
+  //    * save current time seconds in local variables to match time of VSYNC pulse
+  //    * compute VSYNC delay ( # of ticks ) since the corresponding PPS
   //
   vs_hh = sec_hh;
   vs_mm = sec_mm;
   vs_ss = sec_ss;
   vs_blnUTC = time_UTC;
+
+  // timeDif = # of ticks from more recent recorded PPS to this VSYNC
+  //
+  if (tk_VSYNC >= tk_PPS)
+  {
+    timeDiff = tk_VSYNC - tk_PPS;
+  }
+  else
+  {
+    timeDiff = 0 - (tk_PPS - tk_VSYNC);
+  }
   
   //****************************
   //  ENABLE interrupts again
@@ -885,22 +913,7 @@ VSYNC_ISR()
   //  Current mode must be WaitingForGPS, Syncing, TimeValid, ErrorMode, or FailMode
   //  Display will be active in all of these modes
   //
-  
-  //*************************************************
-  //  VSYNC time
-  //    - determine field time delay from latest PPS
-  //
-  noInterrupts();           // protect tk_pps from interrupts
-  if (tk_VSYNC >= tk_PPS)
-  {
-    timeDiff = tk_VSYNC - tk_PPS;
-  }
-  else
-  {
-    timeDiff = 0 - (tk_PPS - tk_VSYNC);
-  }
-  interrupts();
-  
+    
   //
   // was the last PPS more than one second ago?
   //   if we are in FailMode or WaitingforGPS mode, don't go to ErrorMode
@@ -1181,8 +1194,22 @@ VSYNC_ISR()
   // Update OSD
   //  - send updated info to Max7456
   //
-  if (EnableOverlay)
+  if (blnSingleLineTest)
+  {
+    // single line Test mode - timestamp in top row
+    //
+    for (int i = 0; i< 30; i++) 
+    {
+      TopRow[i] = 0x00;
+    }
+    
+    OSD.sendArray(osdTop_RowOffset,BottomRow,30);     // time in top row
+    OSD.sendArray(osdBottom_RowOffset,TopRow,30);     // nothing in bottom row
+  }
+  else if (EnableOverlay)
   {    
+    // NORMAL mode
+    //
     OSD.sendArray(osdTop_RowOffset,TopRow,30);
   
     OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
@@ -1316,11 +1343,6 @@ PPS_ISR()
   //
   pps_now = true;
 
- 
-  // OK to enable ints
-  //
-  interrupts();
-
   //********************************
   // Other Modes
   //  *Error Mode
@@ -1396,7 +1418,6 @@ PPS_ISR()
 
         // now verify that this time matches the values from the previous RMC sentence (which should now be UTC)
         //
-        noInterrupts();     // protect hh:mm:ss check
         if ((gpsRMC.hh != sec_hh) || (gpsRMC.mm != sec_mm) || (gpsRMC.ss != sec_ss))
         {
           // Opps! the internal UTC time does not match the RMC values... display error and start over again with a new SYNC
@@ -1417,10 +1438,8 @@ PPS_ISR()
           OSD.atomax(&BottomRow[1],(uint8_t*)msgSyncFailed,len_msgSyncFailed);
           bytetodec2(BottomRow + len_msgSyncFailed + 2,(byte)ErrorFound);
           
-          interrupts();
           return;
         }
-        interrupts();          
 
         // set flag to indicate we are now on UTC time
         //
@@ -1455,12 +1474,10 @@ PPS_ISR()
     {
       // RMC time should correspond to the PREVIOUS second
       //
-      noInterrupts();       // update hh:mm:ss as one operation
       sec_ss = gpsRMC.ss;
       sec_mm = gpsRMC.mm;
       sec_hh = gpsRMC.hh;
       SecInc();               // bump the count by one to match the second for THIS PPS signal    
-      interrupts();
     }
 
     // GPS data looks good => move to Syncing mode (we will check the next five seconds for consistency)
@@ -1547,7 +1564,6 @@ PPS_ISR()
     //
     if (ErrorFound == 0)
     {
-      noInterrupts();     // protect hh:mm:ss check
       if ((gpsRMC.hh != sec_hh) || (gpsRMC.mm != sec_mm) || (gpsRMC.ss != sec_ss))
       {
         ErrorFound = 2;
@@ -1556,7 +1572,6 @@ PPS_ISR()
       {
         ErrorFound = 3;
       }
-      interrupts();          
     }
     
     // if error, report it and return
@@ -1568,10 +1583,8 @@ PPS_ISR()
       CurrentMode = ErrorMode;
       ErrorCountdown = ERROR_DISPLAY_SECONDS;
 
-      noInterrupts();                 // clear the ave interval computation
       tk_pps_interval_total = 0;
       tk_pps_interval_count = 0;
-      interrupts();
       
       // Error message
       //
@@ -1611,7 +1624,6 @@ PPS_ISR()
 
       // RMC time should correspond to the PREVIOUS second
       //
-      noInterrupts();       // protect volatiles from changing ...
       sec_ss = gpsRMC.ss;
       sec_mm = gpsRMC.mm;
       sec_hh = gpsRMC.hh;
@@ -1646,9 +1658,6 @@ PPS_ISR()
       tk_pps_interval_total = 0;                                                // reset
       tk_pps_interval_count = 0;
 
-      
-      interrupts();     // int back on again
-
       // We now have a valid time base... 
       //
       CurrentMode = TimeValid;
@@ -1675,6 +1684,13 @@ PPS_ISR()
     OSD.atomax(&BottomRow[1],(uint8_t*)msgUnknownError,len_msgUnknownError);
     
   }  // end of check for current mode
+
+
+  //*******************************
+  // OK to ENABLE INTERRUPTS
+  //
+  interrupts();
+  
     
 } // end of PPS_ISR
 
