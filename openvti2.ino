@@ -1080,7 +1080,7 @@ VSYNC_ISR()
           // software version
           //
           TopRow[1] = 0x20;   // V
-          TopRow[3] = 0x05;   // 5
+          TopRow[3] = 0x06;   // 6
           TopRow[4] = 0x41;   // '.'
           TopRow[5] = 0x0A;   // 0
 
