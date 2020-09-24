@@ -2262,6 +2262,10 @@ bool ReadGPS()
               { 
                 ubxSec += offsetUTC_Default;      // move to GPS time
               }
+              if (ubxSec >= 86400)
+              {
+                ubxSec -= 86400;      // fixup 24hr overflow
+              }
               
               if (ubxSec != internalSec)
               {
@@ -3177,4 +3181,3 @@ uint16_t getFlashCRC( uint32_t lastAddr )
   return( crc_u16 );
 
 } // end of getFlashCRC
-
