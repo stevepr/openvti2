@@ -419,6 +419,8 @@ void setup() {
 
   // NTSC or PAL?
   //
+  OSD.setSyncSource(MAX7456_AUTOSYNC);
+  
   videoStd = 0;
   while (videoStd == 0)
   {
@@ -451,7 +453,6 @@ void setup() {
   }
   
   OSD.setTextArea(rows, cols, MAX7456_FULLSCREEN);
-  OSD.setSyncSource(MAX7456_AUTOSYNC);
   OSD.setWhiteLevel(0);  // should be 0% black 120% white
   OSD.setCharEncoding(MAX7456_ASCII);       // use this char set
 
@@ -2247,13 +2248,13 @@ bool ReadGPS()
           if ( CurrentMode == TimeValid )
           {
             
-            internalSec = n_hh*3600 + n_mm*60 + n_ss;   // internal seconds of the day
+            internalSec = (long)n_hh*3600 + (long)n_mm*60 + (long)n_ss;   // internal seconds of the day
             
             if (!n_blnUTC)
             {
               // internal time is GPS
               //
-              ubxSec = gpsPUBX04.hh*3600 + gpsPUBX04.mm * 60 + gpsPUBX04.ss;
+              ubxSec = (long)gpsPUBX04.hh*3600 + (long)gpsPUBX04.mm * 60 + (long)gpsPUBX04.ss;
               if (gpsPUBX04.blnLeapValid )
               {
                 ubxSec += offsetUTC_Current;      // move to GPS time
@@ -2278,7 +2279,7 @@ bool ReadGPS()
               // internal time is UTC
               //   UBX time should be UTC also
               //
-              ubxSec = gpsPUBX04.hh*3600 + gpsPUBX04.mm * 60 + gpsPUBX04.ss;
+              ubxSec = (long)gpsPUBX04.hh*3600 + (long)gpsPUBX04.mm * 60 + (long)gpsPUBX04.ss;
               if (ubxSec != internalSec)
               {
                 ErrorFound = 11;
