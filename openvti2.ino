@@ -171,11 +171,9 @@ MAX7456 OSD( osdChipSelect );
 
 //  Local OSD rows
 //
-uint8_t TopRow[30];
-uint16_t TopRow_Addr = 30;            // Top Row is row 1
+uint8_t TopRow[50];
 
-uint8_t BottomRow[30];
-uint16_t BottomRow_Addr = 9 * 30;    // Top Row is row 11 (good for NTSC)
+uint8_t BottomRow[50];
 
 #if (TESTROW == 1)
 uint8_t TestRow[30];
@@ -338,6 +336,8 @@ volatile bool blnEchoNMEA = true;
 void setup() {
   uint8_t rows;
   uint8_t cols;    
+
+  unsigned long tmpTime;
   
   //************
   //  General init
@@ -368,10 +368,18 @@ void setup() {
   pinMode(12,INPUT);
   pinMode(13,INPUT);
 
+  // set D7 to low, output for PPS LED
+  //
+  digitalWrite(7,LOW);  
+  pinMode(7,OUTPUT);
+
   // connect to USB port at 115200 so we send data quickly
   //
   //
   Serial.begin(115200);
+
+  Serial.print("start: ");
+  Serial.println(millis());
 
   //*****************
   //  Delay to allow startup time for external devices
@@ -401,8 +409,28 @@ void setup() {
     OSD.atomax(&BottomRow[1],(uint8_t*)msgGPSfail,len_msgGPSfail);
     bytetodec2(&BottomRow[1 + len_msgGPSfail + 1],gpsInitStatus);
   }
-
+  else
+  {
   
+    //    * WaitingForGPS mode = start by looking for GPS NMEA and PPS to get in sync
+    //
+    time_UTC = false;     // assume NOT UTC for now...
+    
+    // "Waiting for GPS" mode
+    //
+    for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
+    {
+      BottomRow[i] = 0x00;
+    }   
+    OSD.atomax(&BottomRow[1], (uint8_t*)msgWaiting, len_msgWaiting);
+    
+    CurrentMode = WaitingForGPS;        // set mode
+  
+  }
+
+  Serial.print("GPS intialized: ");
+  Serial.println(millis());
+
 
   //************
   //  Init max OSD chip
@@ -415,11 +443,16 @@ void setup() {
   
   // Initialize the MAX7456 OSD:
   //
+  delay(200);                 // make sure max7456 has time to wake up
   OSD.begin();                // Use NTSC with full area.
-
+  
   // NTSC or PAL?
   //
   OSD.setSyncSource(MAX7456_AUTOSYNC);
+
+  Serial.print("OSD intialized: ");
+  Serial.println(millis());
+
   
   videoStd = 0;
   while (videoStd == 0)
@@ -427,6 +460,9 @@ void setup() {
     videoStd = OSD.videoSystem();
     delay(100);
   }
+  Serial.print("VideoStd determined: ");
+  Serial.println(millis());
+
 
   if ( videoStd == MAX7456_NTSC )
   {
@@ -476,8 +512,18 @@ void setup() {
 
   // align with IOTA-VTI
   OSD.setTextOffset(OSD_X_OFFSET, OSD_Y_OFFSET);
+
+  // set initial message
+  //
+  OSD.sendArray(osdTop_RowOffset,TopRow,30);
+  OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
   
   OSD.display();                              // Activate the text display.
+  
+  digitalWrite(7,HIGH);    
+  Serial.print("OSD activated: ");
+  Serial.println(millis());
+
 
   //*****************  
   // HSYNC input
@@ -551,19 +597,6 @@ void setup() {
   
   //*********************
   //  OK, startup the regular timing operation
-  //    * WaitingForGPS mode = start by looking for GPS NMEA and PPS to get in sync
-  //
-  time_UTC = false;     // assume NOT UTC for now...
-  
-  // "Waiting for GPS" mode
-  //
-  for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
-  {
-    BottomRow[i] = 0x00;
-  }   
-  OSD.atomax(&BottomRow[1], (uint8_t*)msgWaiting, len_msgWaiting);
-  
-  CurrentMode = WaitingForGPS;        // set mode
 
   // reset command stream from PC
   //     clear incomming data buffer from PC
@@ -578,6 +611,11 @@ void setup() {
   // start the overlay
   //
   EnableOverlay = true;
+
+  Serial.print("Overlay enabled: ");
+  Serial.println(millis());
+
+  
  
 } // end of setup
 
