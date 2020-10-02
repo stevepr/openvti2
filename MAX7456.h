@@ -139,7 +139,7 @@
       bool           begin( 
                          uint8_t    cols, 
                          uint8_t    rows, 
-                         uint8_t    area        = MAX7456_ACTIONSAFE, 
+                         uint8_t    area        = MAX7456_FULLSCREEN, 
                          SPIClass * handleToSPI = &SPI
                        );
       
@@ -209,7 +209,7 @@
       bool           setTextArea( 
                          int8_t  cols, 
                          int8_t  rows, 
-                         uint8_t area = MAX7456_ACTIONSAFE 
+                         uint8_t area = MAX7456_FULLSCREEN 
                        );
       
       bool           setCharEncoding( 
@@ -336,5 +336,3 @@
 
 
 #endif
-
-

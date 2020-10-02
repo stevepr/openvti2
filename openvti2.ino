@@ -436,45 +436,117 @@ void setup() {
   
   // Initialize the MAX7456 OSD:
   //
-  delay(200);                 // make sure max7456 has time to wake up
-  OSD.begin();                // Use NTSC with full area.
-  
-  // NTSC or PAL?
-  //
-  OSD.setSyncSource(MAX7456_AUTOSYNC);
-  
-  videoStd = 0;
-  while (videoStd == 0)
-  {
-    videoStd = OSD.videoSystem();
-    delay(100);
-  }
 
-  if ( videoStd == MAX7456_NTSC )
+  if (1)
   {
-    rows = OSD.safeVideoRows[MAX7456_NTSC][MAX7456_FULLSCREEN];
-    cols = OSD.safeVideoCols[MAX7456_NTSC][MAX7456_FULLSCREEN];    
-    OSD.setDefaultSystem(MAX7456_NTSC);
+    delay(1000);     // wait one second
     
-    osdTop_RowOffset = TOP_ROW_NTSC*30;    
-    osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
-  }
-  else if (videoStd == MAX7456_PAL)
-  {
-    rows = OSD.safeVideoRows[MAX7456_PAL][MAX7456_FULLSCREEN];
-    cols = OSD.safeVideoCols[MAX7456_PAL][MAX7456_FULLSCREEN];    
-    OSD.setDefaultSystem(MAX7456_PAL);
+    // init the device into FULL SCREEN MODE
+    //
+    OSD.begin();                                      // start up (with NTSC_FULLSCREEN by default)
+
+    // check for video input
+    //
+    if (OSD.lossOfSync())
+    {
+
+      Serial.println("no video");
+      
+      // no video at input
+      //
+      OSD.setDefaultSystem(MAX7456_NTSC);       // default to NTSC
+      OSD.setSyncSource(MAX7456_INTSYNC);       // use internal sync
+
+      // setup rows for display
+      //
+      osdTop_RowOffset = TOP_ROW_NTSC*30;    
+      osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
+      
+    }
+    else
+    {
+      // YES, we have a video signal
+      //
+      OSD.setSyncSource(MAX7456_EXTSYNC);       // use internal sync
+      
+      // set row and columns according to the video standard
+      //
+      videoStd = OSD.videoSystem();
+      if ( videoStd == MAX7456_NTSC )
+      {
+        Serial.println("Video = NTSC");
+        rows = OSD.safeVideoRows[MAX7456_NTSC][MAX7456_FULLSCREEN];
+        cols = OSD.safeVideoCols[MAX7456_NTSC][MAX7456_FULLSCREEN];    
+        OSD.setDefaultSystem(MAX7456_NTSC);
+        
+        osdTop_RowOffset = TOP_ROW_NTSC*30;    
+        osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
+      }
+      else if (videoStd == MAX7456_PAL)
+      {
+        Serial.println("Video = PAL");
+        rows = OSD.safeVideoRows[MAX7456_PAL][MAX7456_FULLSCREEN];
+        cols = OSD.safeVideoCols[MAX7456_PAL][MAX7456_FULLSCREEN];    
+        OSD.setDefaultSystem(MAX7456_PAL);
+        
+        osdTop_RowOffset = TOP_ROW_PAL*30;
+        osdBottom_RowOffset = BOTTOM_ROW_PAL*30;
+      }
+      else
+      {
+        EnableOverlay = false;
+        return;      // unknown video standard... do nothing
+      }
+      OSD.setTextArea(rows, cols, MAX7456_FULLSCREEN);
+      
+    }  
     
-    osdTop_RowOffset = TOP_ROW_PAL*30;
-    osdBottom_RowOffset = BOTTOM_ROW_PAL*30;
-  }
+  }     // end of "new" code trial
   else
   {
-    EnableOverlay = false;
-    return;      // unknown video standard... do nothing
-  }
   
-  OSD.setTextArea(rows, cols, MAX7456_FULLSCREEN);
+    OSD.begin();                // Use NTSC with full area.
+      
+    // NTSC or PAL?
+    //
+    OSD.setSyncSource(MAX7456_AUTOSYNC);
+    
+    videoStd = 0;
+    while (videoStd == 0)
+    {
+      videoStd = OSD.videoSystem();
+      delay(100);
+    }
+  
+    if ( videoStd == MAX7456_NTSC )
+    {
+      rows = OSD.safeVideoRows[MAX7456_NTSC][MAX7456_FULLSCREEN];
+      cols = OSD.safeVideoCols[MAX7456_NTSC][MAX7456_FULLSCREEN];    
+      OSD.setDefaultSystem(MAX7456_NTSC);
+      
+      osdTop_RowOffset = TOP_ROW_NTSC*30;    
+      osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
+    }
+    else if (videoStd == MAX7456_PAL)
+    {
+      rows = OSD.safeVideoRows[MAX7456_PAL][MAX7456_FULLSCREEN];
+      cols = OSD.safeVideoCols[MAX7456_PAL][MAX7456_FULLSCREEN];    
+      OSD.setDefaultSystem(MAX7456_PAL);
+      
+      osdTop_RowOffset = TOP_ROW_PAL*30;
+      osdBottom_RowOffset = BOTTOM_ROW_PAL*30;
+    }
+    else
+    {
+      EnableOverlay = false;
+      return;      // unknown video standard... do nothing
+    }
+    
+    OSD.setTextArea(rows, cols, MAX7456_FULLSCREEN);
+    
+  }
+
+  
   OSD.setWhiteLevel(0);  // should be 0% black 120% white
   OSD.setCharEncoding(MAX7456_ASCII);       // use this char set
 
@@ -558,24 +630,26 @@ void setup() {
 
   TCNT4 = 0;        // timer4: reset count
   TIFR4 = 0;        // timer4: reset all pending interrupts
-  TIMSK4 = (1 << ICIE4) | (1 << TOIE4);   // timer 4: turn on IC capture and overflow interrupts
 
   // VSYNC ...
   //
+  
+  fieldParity = 0;  //   Tell the VSYNC ISR to try to detect the field order on this first VSYNC
   tk_VSYNC = 0;     // ok ... ready for vsync interrupts now
   
   TCNT5 = 0;        // timer5: reset count
   TIFR5 = 0;        // timer5: reset all pending interrupts
-  TIMSK5 = (1 << ICIE5);   // timer 5: turn on IC capture and NO overfloww interrupts
 
-  timer4_ov = 0;    // timer4: reser overflow count (used for timer5 overflow as well)
+  timer4_ov = 0;    // timer4: reset overflow count (used for timer5 overflow as well)
   GTCCR = 0;    // RESTART prescaler and all synchronous timers => Timer4 and Timer5 are now sync'd
+
+  // enable the interrupts for PPS and VSYNC
+  //
+  TIMSK5 = (1 << ICIE5);                  // VSYNC timer 5: turn on IC interrupt for VSYNC and NO overflow interrupts
+  TIMSK4 = (1 << ICIE4) | (1 << TOIE4);   // PPS timer 4: turn on IC capture and overflow interrupts
 
   //*********************
   //  VSYNC in now happening
-  //   Tell the VSYNC ISR to try to detect the field order on this first VSYNC
-  //
-  fieldParity = 0;
   
   //*********************
   //  OK, startup the regular timing operation
@@ -608,40 +682,37 @@ void setup() {
 void loop() 
 {
 
-  while (true)
+
+  // get & parse serial data from GPS
+  //
+  ReadGPS();
+
+  // compute PPS stats
+  //
+  if ( tk_pps_interval_count == 10 )
   {
-
-    // get & parse serial data from GPS
-    //
-    ReadGPS();
-
-    // compute PPS stats
-    //
-    if ( tk_pps_interval_count == 10 )
-    {
-      noInterrupts();
-      tk_pps_interval_ave = tk_pps_interval_total / tk_pps_interval_count;      // compute the average delay between PPS intervals
-      Timer_Second = tk_pps_interval_ave;                                       // use this average as the new definition of a second
-      Timer_100ms = Timer_Second / 10;
-      
-      tk_pps_interval_total = 0;                                                // reset
-      tk_pps_interval_count = 0;
-      interrupts();
-    }
-
-    // Read any pending command data from USB port
-    //
-    ReadCMD();
-
-    // Execute pending command
-    //
-    if (Cmd_Next < 0)
-    {
-      
-      ExecCMD();
-    } // end of executing commands
+    noInterrupts();
+    tk_pps_interval_ave = tk_pps_interval_total / tk_pps_interval_count;      // compute the average delay between PPS intervals
+    Timer_Second = tk_pps_interval_ave;                                       // use this average as the new definition of a second
+    Timer_100ms = Timer_Second / 10;
     
-  } // end of loop
+    tk_pps_interval_total = 0;                                                // reset
+    tk_pps_interval_count = 0;
+    interrupts();
+  }
+
+  // Read any pending command data from USB port
+  //
+  ReadCMD();
+
+  // Execute pending command
+  //
+  if (Cmd_Next < 0)
+  {
+    
+    ExecCMD();
+  } // end of executing commands
+    
 
 } // end of loop()
 
@@ -869,6 +940,10 @@ VSYNC_ISR()
     {
       fieldParity = 2;
     }
+
+    // just leave - we can pick up normal operation with next VSYNC
+    //
+    return;
     
   } // end of fieldParity detection
 
@@ -1219,14 +1294,17 @@ VSYNC_ISR()
     {
       TopRow[i] = 0x00;
     }
-    
+
+    noInterrupts();
     OSD.sendArray(osdTop_RowOffset,BottomRow,30);     // time in top row
     OSD.sendArray(osdBottom_RowOffset,TopRow,30);     // nothing in bottom row
+    interrupts();
   }
   else if (EnableOverlay)
   {    
     // NORMAL mode
     //
+    noInterrupts();
     OSD.sendArray(osdTop_RowOffset,TopRow,30);
   
     OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
@@ -1234,7 +1312,7 @@ VSYNC_ISR()
     #if (TESTROW == 1)
     OSD.sendArray(5*30,TestRow,30); // testing...
     #endif
-    
+    interrupts();
   }
 
   //**********************
