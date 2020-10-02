@@ -378,9 +378,6 @@ void setup() {
   //
   Serial.begin(115200);
 
-  Serial.print("start: ");
-  Serial.println(millis());
-
   //*****************
   //  Delay to allow startup time for external devices
   //   max7456 typically needs 50ms
@@ -428,10 +425,6 @@ void setup() {
   
   }
 
-  Serial.print("GPS intialized: ");
-  Serial.println(millis());
-
-
   //************
   //  Init max OSD chip
   //
@@ -449,10 +442,6 @@ void setup() {
   // NTSC or PAL?
   //
   OSD.setSyncSource(MAX7456_AUTOSYNC);
-
-  Serial.print("OSD intialized: ");
-  Serial.println(millis());
-
   
   videoStd = 0;
   while (videoStd == 0)
@@ -460,9 +449,6 @@ void setup() {
     videoStd = OSD.videoSystem();
     delay(100);
   }
-  Serial.print("VideoStd determined: ");
-  Serial.println(millis());
-
 
   if ( videoStd == MAX7456_NTSC )
   {
@@ -519,10 +505,6 @@ void setup() {
   OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
   
   OSD.display();                              // Activate the text display.
-  
-  digitalWrite(7,HIGH);    
-  Serial.print("OSD activated: ");
-  Serial.println(millis());
 
 
   //*****************  
@@ -611,10 +593,6 @@ void setup() {
   // start the overlay
   //
   EnableOverlay = true;
-
-  Serial.print("Overlay enabled: ");
-  Serial.println(millis());
-
   
  
 } // end of setup
