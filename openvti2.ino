@@ -171,9 +171,9 @@ MAX7456 OSD( osdChipSelect );
 
 //  Local OSD rows
 //
-uint8_t TopRow[50];
+uint8_t TopRow[30];
 
-uint8_t BottomRow[50];
+uint8_t BottomRow[30];
 
 #if (TESTROW == 1)
 uint8_t TestRow[30];
@@ -265,7 +265,7 @@ volatile bool pps_now = false;        // true => PPS just happened
 
 #define NMEA_MAX  201    // max length of a nmea sentence
 
-uint8_t nmeaSentence[NMEA_MAX];       // current NMEA sentence
+uint8_t nmeaSentence[NMEA_MAX+1];     // current NMEA sentence
 int nmeaCount = -1;                   // position of next char in NMEA sentence = # of chars in current sentence, 0 => no current sentence
   
 #define MAX_FIELDS 17       // GGA has 17 fields (including the terminating CRLF)
@@ -383,7 +383,7 @@ void setup() {
   //   max7456 typically needs 50ms
   //
   delay(100);     // 100 ms to make sure
-  
+
   //************
   // Init GPS
   //
@@ -436,90 +436,42 @@ void setup() {
   
   // Initialize the MAX7456 OSD:
   //
+    
+  delay(1000);     // wait a bit to ensure that LOS is accurate
+  
+  // init the device into FULL SCREEN MODE
+  //
+  OSD.begin();                                      // start up (with NTSC_FULLSCREEN by default)
+  OSD.setSyncSource(MAX7456_AUTOSYNC);              // use autosync mode
 
-  if (1)
+  // check for video input
+  //
+  if (OSD.lossOfSync())
   {
-    delay(1000);     // wait one second
+
+    Serial.println("no video");
     
-    // init the device into FULL SCREEN MODE
+    // no video at input
     //
-    OSD.begin();                                      // start up (with NTSC_FULLSCREEN by default)
+    OSD.setDefaultSystem(MAX7456_NTSC);       // default to NTSC
 
-    // check for video input
+    // setup rows for display
     //
-    if (OSD.lossOfSync())
-    {
-
-      Serial.println("no video");
-      
-      // no video at input
-      //
-      OSD.setDefaultSystem(MAX7456_NTSC);       // default to NTSC
-      OSD.setSyncSource(MAX7456_INTSYNC);       // use internal sync
-
-      // setup rows for display
-      //
-      osdTop_RowOffset = TOP_ROW_NTSC*30;    
-      osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
-      
-    }
-    else
-    {
-      // YES, we have a video signal
-      //
-      OSD.setSyncSource(MAX7456_EXTSYNC);       // use internal sync
-      
-      // set row and columns according to the video standard
-      //
-      videoStd = OSD.videoSystem();
-      if ( videoStd == MAX7456_NTSC )
-      {
-        Serial.println("Video = NTSC");
-        rows = OSD.safeVideoRows[MAX7456_NTSC][MAX7456_FULLSCREEN];
-        cols = OSD.safeVideoCols[MAX7456_NTSC][MAX7456_FULLSCREEN];    
-        OSD.setDefaultSystem(MAX7456_NTSC);
-        
-        osdTop_RowOffset = TOP_ROW_NTSC*30;    
-        osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
-      }
-      else if (videoStd == MAX7456_PAL)
-      {
-        Serial.println("Video = PAL");
-        rows = OSD.safeVideoRows[MAX7456_PAL][MAX7456_FULLSCREEN];
-        cols = OSD.safeVideoCols[MAX7456_PAL][MAX7456_FULLSCREEN];    
-        OSD.setDefaultSystem(MAX7456_PAL);
-        
-        osdTop_RowOffset = TOP_ROW_PAL*30;
-        osdBottom_RowOffset = BOTTOM_ROW_PAL*30;
-      }
-      else
-      {
-        EnableOverlay = false;
-        return;      // unknown video standard... do nothing
-      }
-      OSD.setTextArea(rows, cols, MAX7456_FULLSCREEN);
-      
-    }  
+    osdTop_RowOffset = TOP_ROW_NTSC*30;    
+    osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
     
-  }     // end of "new" code trial
+  }
   else
   {
-  
-    OSD.begin();                // Use NTSC with full area.
-      
-    // NTSC or PAL?
+    // YES, we have a video signal
     //
-    OSD.setSyncSource(MAX7456_AUTOSYNC);
     
-    videoStd = 0;
-    while (videoStd == 0)
-    {
-      videoStd = OSD.videoSystem();
-      delay(100);
-    }
-  
+    // set row and columns according to the video standard
+    //
+    videoStd = OSD.videoSystem();
     if ( videoStd == MAX7456_NTSC )
     {
+      Serial.println("Video = NTSC");
       rows = OSD.safeVideoRows[MAX7456_NTSC][MAX7456_FULLSCREEN];
       cols = OSD.safeVideoCols[MAX7456_NTSC][MAX7456_FULLSCREEN];    
       OSD.setDefaultSystem(MAX7456_NTSC);
@@ -529,6 +481,7 @@ void setup() {
     }
     else if (videoStd == MAX7456_PAL)
     {
+      Serial.println("Video = PAL");
       rows = OSD.safeVideoRows[MAX7456_PAL][MAX7456_FULLSCREEN];
       cols = OSD.safeVideoCols[MAX7456_PAL][MAX7456_FULLSCREEN];    
       OSD.setDefaultSystem(MAX7456_PAL);
@@ -541,11 +494,10 @@ void setup() {
       EnableOverlay = false;
       return;      // unknown video standard... do nothing
     }
-    
     OSD.setTextArea(rows, cols, MAX7456_FULLSCREEN);
     
-  }
-
+  }  
+    
   
   OSD.setWhiteLevel(0);  // should be 0% black 120% white
   OSD.setCharEncoding(MAX7456_ASCII);       // use this char set
@@ -667,7 +619,6 @@ void setup() {
   // start the overlay
   //
   EnableOverlay = true;
-  
  
 } // end of setup
 
@@ -1286,34 +1237,38 @@ VSYNC_ISR()
   // Update OSD
   //  - send updated info to Max7456
   //
-  if (blnSingleLineTest)
+  if (EnableOverlay)
   {
-    // single line Test mode - timestamp in top row
-    //
-    for (int i = 0; i< 30; i++) 
+    if (blnSingleLineTest)
     {
-      TopRow[i] = 0x00;
+      // single line Test mode - timestamp in top row
+      //
+      for (int i = 0; i< 30; i++) 
+      {
+        TopRow[i] = 0x00;
+      }
+  
+      noInterrupts();
+      OSD.sendArray(osdTop_RowOffset,BottomRow,30);     // time in top row
+      OSD.sendArray(osdBottom_RowOffset,TopRow,30);     // nothing in bottom row
+      interrupts();
     }
-
-    noInterrupts();
-    OSD.sendArray(osdTop_RowOffset,BottomRow,30);     // time in top row
-    OSD.sendArray(osdBottom_RowOffset,TopRow,30);     // nothing in bottom row
-    interrupts();
-  }
-  else if (EnableOverlay)
-  {    
-    // NORMAL mode
-    //
-    noInterrupts();
-    OSD.sendArray(osdTop_RowOffset,TopRow,30);
-  
-    OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
-  
-    #if (TESTROW == 1)
-    OSD.sendArray(5*30,TestRow,30); // testing...
-    #endif
-    interrupts();
-  }
+    else
+    {    
+      // NORMAL mode
+      //
+      noInterrupts();
+      OSD.sendArray(osdTop_RowOffset,TopRow,30);
+    
+      OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
+    
+      #if (TESTROW == 1)
+      OSD.sendArray(5*30,TestRow,30); // testing...
+      #endif
+      interrupts();
+    }
+    
+  } // end of updating overlay
 
   //**********************
   //  lastly - optionally echo VSYNC time to USB port
@@ -2260,6 +2215,7 @@ bool ReadGPS()
       {
         // oops! - currently in a sentence, should not be here
         //
+        nmeaCount = 0;
         return false;
       }
 
