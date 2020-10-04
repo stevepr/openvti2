@@ -248,6 +248,12 @@ volatile int sec_ss;
 volatile int offsetUTC_Default = -1;      // receiver default value for GPS-UTC offset
 volatile int offsetUTC_Current = -1;      // current/valid GPS-UTC offset
 
+// LED control
+//
+int LED_PIN = 7;                                  // PIN for PPS LED output
+volatile boolean LED_ON = false;                  // LED state
+volatile unsigned short LED_Duration;             // # of clock counts for LED duration (16 us per tick)
+
 //******************
 // GPS info
 // 
@@ -370,8 +376,8 @@ void setup() {
 
   // set D7 to low, output for PPS LED
   //
-  digitalWrite(7,LOW);  
-  pinMode(7,OUTPUT);
+  digitalWrite(LED_PIN,LOW);  
+  pinMode(LED_PIN,OUTPUT);
 
   // connect to USB port at 115200 so we send data quickly
   //
@@ -539,11 +545,24 @@ void setup() {
 
   //**********************
   //  Init timers for input capture and timing
+  //    Timer 3 - pps LED flash duration
   //    Timer 4 - 1pps
   //    Timer 5 - VSYNC
   //  * get them setup with Mask OFF to prevent interrupts until we are ready
   //
 
+  //  Timer 3 - for LED flash duration
+  //    CTC mode 4
+  //    prescaler OFF => timer OFF for now / but will be set to f/256 for actual timing
+  //    OCR3A set to desired duration
+  //    PRR1 disabled to allow timer
+  //
+  LED_Duration = 10000 / 16;   // set 10 ms as default LED duration
+  LED_ON = false;             // not yet...
+  TCCR3A = 0;               // compare output disconnected, WGM bits 1 and 0 set to 0
+  TCCR3B = (1 << WGM32);    // CTC3 set => mode 4 AND CS3 = 0 (no input => clock stopped)
+  PRR1 &= ~(1 << PRTIM3);   // disable power reduction for timer 3 to enable timer
+  LED_ON = true;            // ok...
 
   //  PPS : Timer 4 - used to capture times of 1pps interrrupts
   //    ICP4 pin (digital 49) set to input
@@ -618,7 +637,7 @@ void setup() {
 
   // start the overlay
   //
-  EnableOverlay = true;
+  EnableOverlay = true;  
  
 } // end of setup
 
@@ -803,6 +822,25 @@ void ExecCMD()
 //*****************************************************************************************
 // ISR routines
 //*****************************************************************************************
+
+//========================================
+// ISR for LED done (timer 3 output compare A interrupt)
+//=========================================
+ISR(TIMER3_COMPA_vect)
+{
+  if (!LED_ON)
+    return;
+    
+  // turn OFF LED
+  //
+  digitalWrite(LED_PIN,false);
+
+  // turn OFF Timer 3
+  //
+  TCCR3B = (1 << WGM32);    // CTC set => mode 4 AND CS = 0 (no input => clock stopped)
+  
+} // end of LED_done_interrupt
+
 
 //===============================
 //  VSYNC ISR = ICP5
@@ -1298,6 +1336,23 @@ PPS_ISR()
   // 
   //
   timeCurrent = GetTicks(CR4);
+
+  // flash LED?
+  //
+  if (LED_ON)
+  {
+    digitalWrite(LED_PIN,true);             // ON 
+  
+    // Turn on LED duration timer
+    //  always enable this timer
+    TCCR3B = 0;                             // no source => clock stopped
+    TIFR3 = 0;                              // clear all pending ints
+    TCNT3 = 0;                              // start count at 0
+    OCR3A = LED_Duration;                   // set duration   
+    TCCR3B |= (1 << CS32);                  // f/256 clock source => timer is ON now   
+    TIMSK3 |= (1 << OCIE3A);                // enable timer compare interrupt
+    
+  }
   
   //*******************
   //   if Init, or Fail , just leave
