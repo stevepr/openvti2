@@ -1961,6 +1961,29 @@ int gpsInit()
                           0x00, 0x00, 0x00, 0x00              // user time function delay
                           };
                           
+  uint8_t configTP5[] = {0x06, 0x31, 0x20, 0x00,              //   configure timepulse via TP5 command  *** needs testing 
+                          0x00,                               // timepulse
+                          0x00, 0x00, 0x00,                   // reserved
+                          0x00, 0x00,                         // antenna delay (ns)
+                          0x00, 0x00,                         // RF group delay (ns)
+                                                              // pps period
+                          0x00, 0x00, 0x00, 0x00,             // period when not locked => OFF
+                          0x40, 0x42, 0x0F, 0x00,             // period when locked = time interval = 1,000,000 us
+                                                              // pulse duration
+                          0x00, 0x00, 0x00, 0x00,             // when NOT locked => OFF
+                          0xA0, 0x86, 0x01, 0x00,             // when LOCKED pulse length = 100,000 us = 100ms
+                          0x00, 0x00, 0x00, 0x00,             // timepuse delay
+                          0x00, 0x00, 0x00, 0x77              // 01110111 = 0x77 
+                                                              // gridUTCGPS = UTC
+                                                              // polarity = rising edge
+                                                              // alignToTOW = true
+                                                              // isLength = true
+                                                              // isFreq = false
+                                                              // lockedOtherSet = true
+                                                              // lockedGPSfreq = true
+                                                              // active = true
+                          };
+                          
   // 9600 NMEA is the default rate for the GPS
   //
   gpsSerial.begin(9600);
@@ -2027,14 +2050,20 @@ int gpsInit()
     return gps_E_PUBX04;
   }
 
+  //
+  // *** need to switch to using CFG-TP5 message for compatibility with later firmware.
+  //     In the meantime, leaving the default timepulse configuration is fine
+  //
+#if (INIT_TP == 1)
   // configure timepulse
   //
-  ubxSend(configTimepulse,sizeof(configTimepulse)/sizeof(uint8_t));
+  ubxSend(configTP5,sizeof(configTimepulse)/sizeof(uint8_t));
   if (!ubxGetAck(configTimepulse))
   {
     return gps_E_CFGTP;
   }
- 
+#endif
+
   return gps_OK;
   
 } // end of gpsInit
