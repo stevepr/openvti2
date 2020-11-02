@@ -1919,6 +1919,9 @@ void SecDec()
 // NEO 6 GPS routines
 //**********************************************************************************************************
 #define gpsSerial Serial1
+
+#define INIT_TP 0             // init timepulse
+
 #define gps_OK        0
 #define gps_E_RMC     1
 #define gps_E_GGA     2
@@ -1960,20 +1963,20 @@ int gpsInit()
                           0x00, 0x00,                         // Receiver RF group delay
                           0x00, 0x00, 0x00, 0x00              // user time function delay
                           };
-                          
+                                                   
   uint8_t configTP5[] = {0x06, 0x31, 0x20, 0x00,              //   configure timepulse via TP5 command  *** needs testing 
                           0x00,                               // timepulse
                           0x00, 0x00, 0x00,                   // reserved
-                          0x00, 0x00,                         // antenna delay (ns)
+                          0x32, 0x00,                         // antenna delay (ns)
                           0x00, 0x00,                         // RF group delay (ns)
                                                               // pps period
-                          0x00, 0x00, 0x00, 0x00,             // period when not locked => OFF
+                          0x40, 0x42, 0x0F, 0x00,             // period when not locked => OFF
                           0x40, 0x42, 0x0F, 0x00,             // period when locked = time interval = 1,000,000 us
                                                               // pulse duration
                           0x00, 0x00, 0x00, 0x00,             // when NOT locked => OFF
                           0xA0, 0x86, 0x01, 0x00,             // when LOCKED pulse length = 100,000 us = 100ms
                           0x00, 0x00, 0x00, 0x00,             // timepuse delay
-                          0x00, 0x00, 0x00, 0x77              // 01110111 = 0x77 
+                          0x77, 0x00, 0x00, 0x00              // 01110111 = 0x77 
                                                               // gridUTCGPS = UTC
                                                               // polarity = rising edge
                                                               // alignToTOW = true
@@ -1983,6 +1986,8 @@ int gpsInit()
                                                               // lockedGPSfreq = true
                                                               // active = true
                           };
+  uint8_t pollTP5[] = {0x06, 0x31, 0x00, 0x00};    // poll settings for timepulse 0
+                          
                           
   // 9600 NMEA is the default rate for the GPS
   //
@@ -2018,6 +2023,21 @@ int gpsInit()
   while (gpsSerial.available())
     gpsSerial.read();
 
+  //
+  // *** need to switch to using CFG-TP5 message for compatibility with later firmware.
+  //     In the meantime, leaving the default timepulse configuration is fine
+  //
+#if (INIT_TP == 1)
+  // configure timepulse
+  //
+  ubxSend(configTP5,sizeof(configTP5)/sizeof(uint8_t));
+  if (!ubxGetAck(configTP5))
+  {
+    return gps_E_CFGTP;
+  }
+#endif
+  
+
   //*********************************
   //  TURN ON sentences that we want
   //    GPRMC
@@ -2050,19 +2070,6 @@ int gpsInit()
     return gps_E_PUBX04;
   }
 
-  //
-  // *** need to switch to using CFG-TP5 message for compatibility with later firmware.
-  //     In the meantime, leaving the default timepulse configuration is fine
-  //
-#if (INIT_TP == 1)
-  // configure timepulse
-  //
-  ubxSend(configTP5,sizeof(configTimepulse)/sizeof(uint8_t));
-  if (!ubxGetAck(configTimepulse))
-  {
-    return gps_E_CFGTP;
-  }
-#endif
 
   return gps_OK;
   
