@@ -140,6 +140,8 @@ char msgSyncFailed[] = "*Sync FAILED*";
 #define len_msgSyncFailed 13
 char msgUnknownError[] = "*FATAL ERROR*";
 #define len_msgUnknownError 13
+char msgNoVSYNC[] = "*No VSYNC*";
+#define len_msgNoVSYNC 13
 
 char msgErrorCodes[] = "   ";
 #define len_msgErrorCodes 3
@@ -620,7 +622,31 @@ void setup() {
   TIMSK4 = (1 << ICIE4) | (1 << TOIE4);   // PPS timer 4: turn on IC capture and overflow interrupts
 
   //*********************
-  //  VSYNC in now happening
+  //  VSYNC should be happening now
+  //    let's check ... wait 100ms for a Vsync to happen
+  //
+  
+  delay(100);
+  if (tk_VSYNC == 0)
+  {
+    // oops! No vsync coming in
+    //   display error message but drop into WaitingForGPS mode just in case it comes back...
+    //
+    Serial.println("*** NO VSYNC ***");
+    
+    //
+    for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
+    {
+      BottomRow[i] = 0x00;
+    }   
+    OSD.atomax(&BottomRow[1], (uint8_t*)msgNoVSYNC, len_msgNoVSYNC);
+    
+    OSD.sendArray(osdTop_RowOffset,TopRow,30);
+    OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
+    
+    CurrentMode = WaitingForGPS;        // set mode
+  }
+
   
   //*********************
   //  OK, startup the regular timing operation
@@ -1163,7 +1189,7 @@ VSYNC_ISR()
           TopRow[1] = 0x20;   // V
           TopRow[3] = 0x06;   // 6
           TopRow[4] = 0x41;   // '.'
-          TopRow[5] = 0x0A;   // 0
+          TopRow[5] = 0x0A;   // 1
 
           // CRC
           //
