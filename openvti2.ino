@@ -229,7 +229,7 @@ volatile unsigned short osdRotation = 0;             // rotation counter for top
 volatile unsigned short timer4_ov;                      // timer 4 overflow count = high word of "time" (32ms per overflow)
 volatile unsigned long Timer_Second = 2000000;          // # of ticks for 1 second
 volatile unsigned long Timer_100ms = 200000;            // ticks / 100ms
-volatile unsigned long PPS_TOLERANCE = 2000;            //  500us tolerance for PPS interval
+volatile unsigned long PPS_TOLERANCE = 2000;            //  1ms tolerance for PPS interval
 #define Timer_Milli 2000              // approx ticks per millisecond
 
 volatile unsigned long tk_pps_interval_total=0;         // sum of pps intervals
@@ -1428,10 +1428,10 @@ PPS_ISR()
   ppsDiff = timeDiff;       
   
   // Check delay since last PPS pulse...
-  //  if too short or too long and we are not in WaitingForGPS mode
+  //  if too short or too long and we are not in Syncing mode or TimeValid mode
   //      go to Error mode
   //
-  if ( (timeDiff < (Timer_Second - PPS_TOLERANCE)) || (timeDiff > (Timer_Second + PPS_TOLERANCE)) && (CurrentMode != WaitingForGPS) )
+  if ( (timeDiff < (Timer_Second - PPS_TOLERANCE)) || (timeDiff > (Timer_Second + PPS_TOLERANCE)) && ((CurrentMode == Syncing) || (CurrentMode == TimeValid)))
   {
 
     // PPS issue!
