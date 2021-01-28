@@ -226,11 +226,12 @@ volatile unsigned short osdRotation = 0;             // rotation counter for top
 //***********************
 //  Time
 //
-volatile unsigned short timer4_ov;                      // timer 4 overflow count = high word of "time" (32ms per overflow)
-volatile unsigned long Timer_Second = 2000000;          // # of ticks for 1 second
-volatile unsigned long Timer_100ms = 200000;            // ticks / 100ms
-volatile unsigned long PPS_TOLERANCE = 2000;            //  1ms tolerance for PPS interval
-#define Timer_Milli 2000              // approx ticks per millisecond
+volatile unsigned short timer4_ov;                            // timer 4 overflow count = high word of "time" (32ms per overflow)
+volatile unsigned long Timer_Second = 2000000;                // # of ticks for 1 second
+volatile unsigned long Timer_100ms = 200000;                  // ticks / 100ms
+volatile unsigned long PPS_TOLERANCE = 2000;                  // tolerance for PPS interval - 1ms
+volatile unsigned long CLOCK_TOLERANCE = 20000;               // tolerance for arduino clock frequency interval - currently 10ms
+
 
 volatile unsigned long tk_pps_interval_total=0;         // sum of pps intervals
 volatile unsigned long tk_pps_interval_count=0;         // # of pps interval
@@ -315,7 +316,7 @@ struct {
 
 struct {
   bool valid;
-  bool dtmWGS84;      // true => datum is currently WGS84
+  bool local_datum[3];
 } gpsDTM;
 
 struct {
@@ -1023,9 +1024,11 @@ VSYNC_ISR()
     
   //
   // was the last PPS more than one second ago?
-  //   if we are in FailMode or WaitingforGPS mode, don't go to ErrorMode
+  //   if we are in Sync Mode, test against clock tolerance
+  //   if TimeValid mode, test against PPS tolerance
   //
-  if ( (timeDiff > (Timer_Second + PPS_TOLERANCE)) && (CurrentMode != FailMode) && (CurrentMode != WaitingForGPS) )
+  if ( ((CurrentMode == Syncing) && (timeDiff > (Timer_Second + CLOCK_TOLERANCE)))
+          || ((CurrentMode == TimeValid) && (timeDiff > (Timer_Second + PPS_TOLERANCE))) )
   {
     
     // opps - we should have seen a PPS by now... this is an error => move to error mode
@@ -1173,9 +1176,9 @@ VSYNC_ISR()
           //    MSL & geoid separation
           if (gpsGGA.valid)
           {
-            TopRow[1] = 0x17;   // M
-            TopRow[2] = 0x1D;   // S
-            TopRow[3] = 0x16;   // L
+            TopRow[1] = 0x0B;   // A
+            TopRow[2] = 0x16;   // L
+            TopRow[3] = 0x1E;   // T
             OSD.atomax(TopRow + 5,gpsGGA.alt_msl,MAX_ALT);
 
             TopRow[5 + MAX_ALT + 1] = 0x18;    // N
@@ -1357,6 +1360,7 @@ PPS_ISR()
   unsigned long timePrev;
   unsigned long timeDiff;
   unsigned long ppsDiff;
+  bool blnIntervalError;
 
   // get the PPS time
   // 
@@ -1426,12 +1430,28 @@ PPS_ISR()
   //   save this to be used by averaging code
   //
   ppsDiff = timeDiff;       
-  
-  // Check delay since last PPS pulse...
-  //  if too short or too long and we are not in Syncing mode or TimeValid mode
-  //      go to Error mode
+
+  // check interval since last PPS
+  // if Syncing or TimerValid mode, check delay since last PPS pulse...
+  //  if too short or too long go to Error mode
   //
-  if ( (timeDiff < (Timer_Second - PPS_TOLERANCE)) || (timeDiff > (Timer_Second + PPS_TOLERANCE)) && ((CurrentMode == Syncing) || (CurrentMode == TimeValid)))
+  blnIntervalError = false;
+  if (CurrentMode == Syncing)
+  {
+    if ((timeDiff < (Timer_Second - CLOCK_TOLERANCE)) || (timeDiff > (Timer_Second + CLOCK_TOLERANCE)))
+    {
+      blnIntervalError = true;
+    }
+  }
+  else if (CurrentMode == TimeValid) 
+  {
+    if ((timeDiff < (Timer_Second - PPS_TOLERANCE)) || (timeDiff > (Timer_Second + PPS_TOLERANCE)))
+    {
+      blnIntervalError = true;
+    }
+  }
+  
+  if ( blnIntervalError)
   {
 
     // PPS issue!
@@ -1785,6 +1805,7 @@ PPS_ISR()
       tk_pps_interval_ave = tk_pps_interval_total / tk_pps_interval_count;      // compute the average delay between PPS intervals
       Timer_Second = tk_pps_interval_ave;                                       // use this average as the new definition of a second
       Timer_100ms = Timer_Second / 10;
+      PPS_TOLERANCE = Timer_Second / 1000;                                      // reset PPS tolerance to 1ms
       
       tk_pps_interval_total = 0;                                                // reset
       tk_pps_interval_count = 0;
@@ -2496,7 +2517,7 @@ bool ReadGPS()
 //=============================================================
 //  ParseNMEA - parse the current NMEA sentence
 //    currently supports the following sentences
-//        RMC, GGA, DTM, and PUBX,04
+//        RMC, GGA, and PUBX,04
 //  INPUTS:
 //    nmeaSentence[] - array of chars containing sentence
 //    nmeaCount = # of chars in sentence (including terminating CRLF)
@@ -2939,6 +2960,38 @@ int ParseRMC(int fieldCount)
   return NMEA_RMC;
   
 } // end of parseRMC
+
+//=============================================================
+//  ParseDTM - parse & save data from the DTM sentence
+//  INPUTS:
+//    nmeaSentence[] - array of chars containing sentence
+//    fieldStart[] - array of starting indicies for fields
+//    fieldCount = # of fields (including CRLF)
+//=============================================================
+int ParseDTM(int fieldCount)
+{
+  int iStart;
+  int iLen;
+
+  //**************
+  // field 1 - datum code
+  //
+  iStart = fieldStart[1];
+  iLen = fieldStart[2] - iStart - 1;
+
+  if (iLen != 3)
+  {
+    return NMEA_ERROR;
+  }
+
+  for (int i = 0; i< 3; i++)
+  {
+    gpsDTM.local_datum[i] = (char)nmeaSentence[iStart+i];
+  }  
+  
+  gpsDTM.valid = true;
+  return NMEA_DTM;
+}
 
 //=============================================================
 //  ParsePUBX04 - parse & save the PUBX04 data of interest
