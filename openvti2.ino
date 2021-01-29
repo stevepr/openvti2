@@ -126,6 +126,10 @@ volatile short int TimeSync;          // ( > 0 ) => we are syncing to GPS senten
 volatile int ErrorCountdown;
 #define ERROR_DISPLAY_SECONDS 2
 
+// Version message
+//
+char msgVersion[] = "6.2";
+
 // Error Messsages
 //
 char msgGPSfail[] ="GPS init failed";
@@ -1191,9 +1195,7 @@ VSYNC_ISR()
           // software version
           //
           TopRow[1] = 0x20;   // V
-          TopRow[3] = 0x06;   // 6
-          TopRow[4] = 0x41;   // '.'
-          TopRow[5] = 0x0A;   // 2
+          OSD.atomax(TopRow+2,(uint8_t*)msgVersion,3);
 
           // CRC
           //
