@@ -308,7 +308,8 @@ struct {
   uint8_t NS;                   // North / South indicator for latitude
   uint8_t lng[MAX_LATLONG];     // longitude
   uint8_t EW;                   // East / West indicator for longitude
-  uint8_t alt_msl[MAX_ALT];     // MSL altitude
+  uint8_t alt[MAX_ALT];         // MSL altitude
+  uint8_t alt_len;              // length of alt field
   uint8_t alt_units;            // units for altitude (should be m for meters)
   uint8_t geoid_sep[MAX_ALT];   // geoid separation (N)
   uint8_t sep_units;            // units for geoid separation 
@@ -1173,15 +1174,15 @@ VSYNC_ISR()
 
         case 2:      
           // altitude 
-          //    MSL & geoid separation
+          //    altitude & geoid separation
           if (gpsGGA.valid)
           {
             TopRow[1] = 0x0B;   // A
             TopRow[2] = 0x16;   // L
             TopRow[3] = 0x1E;   // T
-            OSD.atomax(TopRow + 5,gpsGGA.alt_msl,MAX_ALT);
-
-            TopRow[5 + MAX_ALT + 1] = 0x18;    // N
+            OSD.atomax(TopRow + 5,gpsGGA.alt,gpsGGA.alt_len);
+            TopRow[5 + gpsGGA.alt_len + 1] = 0x31;            // m => meters
+            
             OSD.atomax(TopRow + 5 + MAX_ALT + 3, gpsGGA.geoid_sep, MAX_ALT);
           }
           break;       
@@ -2782,13 +2783,14 @@ int ParseGGA(int fieldCount)
   {
     if (i < iLen)
     {
-      gpsGGA.alt_msl[i] = nmeaSentence[iStart + i];    
+      gpsGGA.alt[i] = nmeaSentence[iStart + i];    
     }
     else
     {
-      gpsGGA.alt_msl[i] = ' ';  // pad with spaces on the end
+      gpsGGA.alt[i] = ' ';  // pad with spaces on the end
     }
   }
+  gpsGGA.alt_len = iLen;
 
   //**************************
   // field 10 = units for altitude
