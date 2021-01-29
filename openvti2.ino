@@ -317,7 +317,7 @@ struct {
 
 struct {
   bool valid;
-  bool local_datum[3];
+  uint8_t local_datum[3];
 } gpsDTM;
 
 struct {
@@ -1177,9 +1177,9 @@ VSYNC_ISR()
           //    altitude & geoid separation
           if (gpsGGA.valid)
           {
-            TopRow[1] = 0x0B;   // A
-            TopRow[2] = 0x16;   // L
-            TopRow[3] = 0x1E;   // T
+  
+            OSD.atomax(TopRow+1,gpsDTM.local_datum,3);
+            
             OSD.atomax(TopRow + 5,gpsGGA.alt,gpsGGA.alt_len);
             TopRow[5 + gpsGGA.alt_len + 1] = 0x31;            // m => meters
             
@@ -1193,7 +1193,7 @@ VSYNC_ISR()
           TopRow[1] = 0x20;   // V
           TopRow[3] = 0x06;   // 6
           TopRow[4] = 0x41;   // '.'
-          TopRow[5] = 0x0A;   // 1
+          TopRow[5] = 0x0A;   // 2
 
           // CRC
           //
@@ -2621,7 +2621,7 @@ int ParseNMEA()
           ((char)nmeaSentence[fStart+4] == 'T') &&
           ((char)nmeaSentence[fStart+5] == 'M') )
     {
-      return NMEA_DTM;
+      return ParseDTM(fieldCount);
     }
     else
     {
@@ -2988,7 +2988,7 @@ int ParseDTM(int fieldCount)
 
   for (int i = 0; i< 3; i++)
   {
-    gpsDTM.local_datum[i] = (char)nmeaSentence[iStart+i];
+    gpsDTM.local_datum[i] = nmeaSentence[iStart+i];
   }  
   
   gpsDTM.valid = true;
