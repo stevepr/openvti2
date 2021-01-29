@@ -128,7 +128,8 @@ volatile int ErrorCountdown;
 
 // Version message
 //
-char msgVersion[] = "6.2";
+char msgVersion[] = "6.2a";
+#define len_msgVersion 4
 
 // Error Messsages
 //
@@ -1195,11 +1196,11 @@ VSYNC_ISR()
           // software version
           //
           TopRow[1] = 0x20;   // V
-          OSD.atomax(TopRow+2,(uint8_t*)msgVersion,3);
+          OSD.atomax(TopRow+2,(uint8_t*)msgVersion,len_msgVersion);
 
           // CRC
           //
-          ustohex(TopRow + 7, pgmCRC);
+          ustohex(TopRow + len_msgVersion + 3, pgmCRC);
 
           // error codes
           //
@@ -1970,7 +1971,7 @@ void SecDec()
 //**********************************************************************************************************
 #define gpsSerial Serial1
 
-#define INIT_TP 0             // init timepulse
+#define INIT_TP 1             // init timepulse
 
 #define gps_OK        0
 #define gps_E_RMC     1
@@ -2019,22 +2020,22 @@ int gpsInit()
                           0x00, 0x00, 0x00,                   // reserved
                           0x32, 0x00,                         // antenna delay (ns)
                           0x00, 0x00,                         // RF group delay (ns)
-                                                              // pps period
-                          0x40, 0x42, 0x0F, 0x00,             // period when not locked => OFF
-                          0x40, 0x42, 0x0F, 0x00,             // period when locked = time interval = 1,000,000 us
-                                                              // pulse duration
+                                                                // pps freq section
+                          0x00, 0x00, 0x00, 0x00,             // freq when not locked => OFF
+                          0x01, 0x00, 0x00, 0x00,             // freq when locked = 1hz
+                                                                // pulse duration section
                           0x00, 0x00, 0x00, 0x00,             // when NOT locked => OFF
                           0xA0, 0x86, 0x01, 0x00,             // when LOCKED pulse length = 100,000 us = 100ms
                           0x00, 0x00, 0x00, 0x00,             // timepuse delay
-                          0x77, 0x00, 0x00, 0x00              // 01110111 = 0x77 
-                                                              // gridUTCGPS = UTC
-                                                              // polarity = rising edge
-                                                              // alignToTOW = true
-                                                              // isLength = true
-                                                              // isFreq = false
-                                                              // lockedOtherSet = true
-                                                              // lockedGPSfreq = true
-                                                              // active = true
+                          0xFF, 0x00, 0x00, 0x00              // 11111111 = 0x7F 
+                                                              // bit 7: gridUTCGPS = 1 = GPS
+                                                              // bit 6: polarity = 1 = rising edge
+                                                              // bit 5: alignToTOW = 1 = true
+                                                              // bit 4: isLength = 1 = true
+                                                              // bit 3: isFreq = 1 = true
+                                                              // bit 2: lockedOtherSet = 1 = true
+                                                              // bit 1: lockedGPSfreq = 1 = true
+                                                              // bit 0: active = 1 = true
                           };
   uint8_t pollTP5[] = {0x06, 0x31, 0x00, 0x00};    // poll settings for timepulse 0
                           
@@ -2086,7 +2087,6 @@ int gpsInit()
     return gps_E_CFGTP;
   }
 #endif
-  
 
   //*********************************
   //  TURN ON sentences that we want
