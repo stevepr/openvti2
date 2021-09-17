@@ -1971,7 +1971,7 @@ void SecDec()
 //**********************************************************************************************************
 #define gpsSerial Serial1
 
-#define INIT_TP 1             // init timepulse
+#define INIT_TP 0             // init timepulse
 
 #define gps_OK        0
 #define gps_E_RMC     1
