@@ -52,7 +52,9 @@ TinySine Video Overlay using Max-7456
 Gowoops GPS Module U-blox NEO-6M
   (Amazon: https://www.amazon.com/Gowoops-Module-Antenna-Arduino-Microcomputer/dp/B01MRNN3YZ)
 
-Use 3.3V power for GPS.
+Use 5V power for GPS.
+
+Use level converter for GPS signals to Arduino (TX,RX, and PPS)
 
 Configure ublox GPS to the following:
 
@@ -118,6 +120,7 @@ enum OperatingMode
   FailMode                // => Unrecoverable failure found
 };
 volatile OperatingMode CurrentMode;    // Current operating mode
+bool blnVideoIn = false;              // true iff video signal on input line
 
 
 #define SYNC_SECONDS 10                // # of seconds for syncing to GPS time
@@ -128,7 +131,7 @@ volatile int ErrorCountdown;
 
 // Version message
 //
-char msgVersion[] = "6.2a";
+char msgVersion[] = "6.2b";
 #define len_msgVersion 4
 
 // Error Messsages
@@ -351,8 +354,6 @@ volatile bool blnEchoNMEA = true;
 void setup() {
   uint8_t rows;
   uint8_t cols;    
-
-  unsigned long tmpTime;
   
   //************
   //  General init
@@ -420,6 +421,7 @@ void setup() {
     //
     OSD.atomax(&BottomRow[1],(uint8_t*)msgGPSfail,len_msgGPSfail);
     bytetodec2(&BottomRow[1 + len_msgGPSfail + 1],gpsInitStatus);
+    
   }
   else
   {
@@ -437,14 +439,16 @@ void setup() {
     OSD.atomax(&BottomRow[1], (uint8_t*)msgWaiting, len_msgWaiting);
     
     CurrentMode = WaitingForGPS;        // set mode
-  
+
   }
+
+
 
   //************
   //  Init max OSD chip
   //
   
-  // Initialize the SPI connection:
+  // Initialize the SPI connection to the OSD board
   //
   SPI.begin();
   SPI.setClockDivider( SPI_CLOCK_DIV2 );      // Must be less than 10MHz.
@@ -453,7 +457,7 @@ void setup() {
   //
     
   delay(1000);     // wait a bit to ensure that LOS is accurate
-  
+   
   // init the device into FULL SCREEN MODE
   //
   OSD.begin();                                      // start up (with NTSC_FULLSCREEN by default)
@@ -465,22 +469,27 @@ void setup() {
   {
 
     Serial.println("no video");
-    
+    blnVideoIn = false;
+    EnableOverlay = false;
+
     // no video at input
     //
+    rows = OSD.safeVideoRows[MAX7456_NTSC][MAX7456_FULLSCREEN];
+    cols = OSD.safeVideoCols[MAX7456_NTSC][MAX7456_FULLSCREEN];    
     OSD.setDefaultSystem(MAX7456_NTSC);       // default to NTSC
 
     // setup rows for display
     //
     osdTop_RowOffset = TOP_ROW_NTSC*30;    
     osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
-    
+ 
   }
   else
   {
     // YES, we have a video signal
     //
-    
+    blnVideoIn = true;
+
     // set row and columns according to the video standard
     //
     videoStd = OSD.videoSystem();
@@ -506,51 +515,59 @@ void setup() {
     }
     else
     {
+      rows = OSD.safeVideoRows[MAX7456_NTSC][MAX7456_FULLSCREEN];
+      cols = OSD.safeVideoCols[MAX7456_NTSC][MAX7456_FULLSCREEN];    
+      OSD.setDefaultSystem(MAX7456_NTSC);
+      
+      osdTop_RowOffset = TOP_ROW_NTSC*30;    
+      osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
+
       EnableOverlay = false;
       return;      // unknown video standard... do nothing
     }
+
+      
     OSD.setTextArea(rows, cols, MAX7456_FULLSCREEN);
     
-  }  
-    
-  
-  OSD.setWhiteLevel(0);  // should be 0% black 120% white
-  OSD.setCharEncoding(MAX7456_ASCII);       // use this char set
+    OSD.setWhiteLevel(0);  // should be 0% black 120% white
+    OSD.setCharEncoding(MAX7456_ASCII);       // use this char set
 
-  // setup background for OSD area
-  //
-#if (GRAYBACKGROUND != 1)
-  OSD.videoBackground();
-#else
-  OSD.setGrayLevel(4);
-  OSD.home();                               //
-  OSD.videoBackground();
-  for ( int r = 0; r < rows; r++ )
-  {
-    for ( int c = 0; c < cols; c++ )
+    // setup background for OSD area
+    //
+  #if (GRAYBACKGROUND != 1)
+    OSD.videoBackground();
+  #else
+    OSD.setGrayLevel(4);
+    OSD.home();                               //
+    OSD.videoBackground();
+    for ( int r = 0; r < rows; r++ )
     {
-      OSD.write((uint8_t)0);
+      for ( int c = 0; c < cols; c++ )
+      {
+        OSD.write((uint8_t)0);
+      }
     }
-  }
-  OSD.grayBackground();     // remaing writes will be gray background
-#endif
+    OSD.grayBackground();     // remaing writes will be gray background
+  #endif
 
-  // align with IOTA-VTI
-  OSD.setTextOffset(OSD_X_OFFSET, OSD_Y_OFFSET);
+    // align with IOTA-VTI
+    OSD.setTextOffset(OSD_X_OFFSET, OSD_Y_OFFSET);
 
-  // set initial message
-  //
-  OSD.sendArray(osdTop_RowOffset,TopRow,30);
-  OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
-  
-  OSD.display();                              // Activate the text display.
+    // set initial message
+    //
+    OSD.sendArray(osdTop_RowOffset,TopRow,30);
+    OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
+    
+    OSD.display();                              // Activate the text display.
 
 
-  //*****************  
-  // HSYNC input
-  //  no interrupt - just polled as an input
-  //
-  HSYNC_CFG_INPUT();
+    //*****************  
+    // HSYNC input
+    //  no interrupt - just polled as an input
+    //
+    HSYNC_CFG_INPUT();
+    
+  }  
 
   //**********************
   //  Init timers for input capture and timing
@@ -612,6 +629,7 @@ void setup() {
   TIFR4 = 0;        // timer4: reset all pending interrupts
 
   // VSYNC ...
+  //  note: only enable this interupt if Video input present!
   //
   
   fieldParity = 0;  //   Tell the VSYNC ISR to try to detect the field order on this first VSYNC
@@ -624,9 +642,14 @@ void setup() {
   GTCCR = 0;    // RESTART prescaler and all synchronous timers => Timer4 and Timer5 are now sync'd
 
   // enable the interrupts for PPS and VSYNC
+  //  BUT ... only enable VSYNC if the video signal is present
   //
-  TIMSK5 = (1 << ICIE5);                  // VSYNC timer 5: turn on IC interrupt for VSYNC and NO overflow interrupts
+  if (blnVideoIn)
+  {
+    TIMSK5 = (1 << ICIE5);                  // VSYNC timer 5: turn on IC interrupt for VSYNC and NO overflow interrupts
+  }
   TIMSK4 = (1 << ICIE4) | (1 << TOIE4);   // PPS timer 4: turn on IC capture and overflow interrupts
+
 
   //*********************
   //  VSYNC should be happening now
@@ -653,8 +676,8 @@ void setup() {
     
     CurrentMode = WaitingForGPS;        // set mode
   }
+    
 
-  
   //*********************
   //  OK, startup the regular timing operation
 
@@ -670,8 +693,12 @@ void setup() {
 
   // start the overlay
   //
-  EnableOverlay = true;  
- 
+
+  if (blnVideoIn)
+  {
+    EnableOverlay = true;  
+  }
+
 } // end of setup
 
 //========================================
@@ -881,8 +908,6 @@ ISR(TIMER3_COMPA_vect)
 VSYNC_ISR()
 {
   unsigned long timeDiff;
-  uint8_t utmp;
-  unsigned long ulTmp;
 
   int vs_hh;      // local copies of this data to match the values at start of this ISR and before
   int vs_mm;      // a subsequent PPS can change them
@@ -2003,41 +2028,6 @@ int gpsInit()
   uint8_t enableDTM[] = {0x06, 0x01, 0x03, 0x00, 0xF0, 0x0A, 0x01};       // Set GPDTM rate on current target
   uint8_t enablePUBX04[] = {0x06, 0x01, 0x03, 0x00, 0xF1, 0x04, 0x01};    // Set PUBX,04 rate on current target
 
-  uint8_t configTimepulse[] = {0x06, 0x07, 0x14, 0x00,        //   configure timepulse
-                          0x40, 0x42, 0x0F, 0x00,             // time interval = 1,000,000 us
-                          0xA0, 0x86, 0x01, 0x00,             // pulse length = 100,000 us = 100ms
-                          0x01,                               // positive pulse
-                          0x00,                               // align to UTC
-                          0x00,                               // time pulse only when sync'd to valid GPS
-                          0x00,                               // reserved
-                          0x00, 0x00,                         // Antenna cable delay
-                          0x00, 0x00,                         // Receiver RF group delay
-                          0x00, 0x00, 0x00, 0x00              // user time function delay
-                          };
-                                                   
-  uint8_t configTP5[] = {0x06, 0x31, 0x20, 0x00,              //   configure timepulse via TP5 command  *** needs testing 
-                          0x00,                               // timepulse
-                          0x00, 0x00, 0x00,                   // reserved
-                          0x32, 0x00,                         // antenna delay (ns)
-                          0x00, 0x00,                         // RF group delay (ns)
-                                                                // pps freq section
-                          0x00, 0x00, 0x00, 0x00,             // freq when not locked => OFF
-                          0x01, 0x00, 0x00, 0x00,             // freq when locked = 1hz
-                                                                // pulse duration section
-                          0x00, 0x00, 0x00, 0x00,             // when NOT locked => OFF
-                          0xA0, 0x86, 0x01, 0x00,             // when LOCKED pulse length = 100,000 us = 100ms
-                          0x00, 0x00, 0x00, 0x00,             // timepuse delay
-                          0xFF, 0x00, 0x00, 0x00              // 11111111 = 0x7F 
-                                                              // bit 7: gridUTCGPS = 1 = GPS
-                                                              // bit 6: polarity = 1 = rising edge
-                                                              // bit 5: alignToTOW = 1 = true
-                                                              // bit 4: isLength = 1 = true
-                                                              // bit 3: isFreq = 1 = true
-                                                              // bit 2: lockedOtherSet = 1 = true
-                                                              // bit 1: lockedGPSfreq = 1 = true
-                                                              // bit 0: active = 1 = true
-                          };
-  uint8_t pollTP5[] = {0x06, 0x31, 0x00, 0x00};    // poll settings for timepulse 0
                           
                           
   // 9600 NMEA is the default rate for the GPS
@@ -2145,14 +2135,14 @@ void ubxSend(uint8_t *MSG, uint32_t len)
   ubxPacket[0]=0xB5;
   ubxPacket[1]= 0x62;
   
-  for(int i=0; i<len; i++) 
+  for(uint8_t i=0; i<len; i++) 
   {
     ubxPacket[i+2]=MSG[i];
   }
 
   // Calculate checksum
   //
-  for(int i=0; i<len; i++)
+  for(uint8_t i=0; i<len; i++)
   {
     CK_A = CK_A + MSG[i];
     CK_B = CK_B + CK_A;
@@ -2180,7 +2170,6 @@ bool ubxGetAck(uint8_t *MSG)
 {
   
   uint8_t b;
-  uint8_t ackByteID;
   uint8_t ackPacket[10];
   uint8_t ackReceived[10];
   unsigned long startTime;
@@ -2514,7 +2503,8 @@ bool ReadGPS()
     
   } // end of loop through available characters
   
-  
+  return true;
+
 } // end of ReadGPS
 
 //=============================================================
@@ -2677,18 +2667,15 @@ int ParseGGA(int fieldCount)
 {
   int iStart;
   int iLen;
-  char cTmp;
 
   gpsGGA.valid = false;
 
-#if 0
-  // should be 17 fields including the CRLF at the end
+  // we need 14 fields including the CRLF at the end
   //
-  if (fieldCount < 17)
+  if (fieldCount < 14)
   {
     return NMEA_ERROR;
   }
-#endif
 
   //******************************
   // field 2 = Latitude
@@ -2869,17 +2856,16 @@ int ParseRMC(int fieldCount)
 {
   int iStart;
   int iLen;
+  int iTmp;
 
   gpsRMC.valid = false;
 
-#if 0
-  // should be 14 fields including the CRLF at the end
+  // we need 12 data fields - 13 including the CRLF at the end
   //
-  if (fieldCount < 14)
+  if (fieldCount < 13)
   {
     return NMEA_ERROR;
   }
-#endif
 
   //******************************
   // field 1 = HH:MM:SS time
@@ -2897,24 +2883,30 @@ int ParseRMC(int fieldCount)
   //  we should keep these changes "atomic"
   //
   noInterrupts();
-  gpsRMC.hh = d2i( &nmeaSentence[iStart]);
-  if (gpsRMC.hh < 0)
+  iTmp = d2i( &nmeaSentence[iStart]);
+  if (iTmp < 0)
   {
      interrupts();
     return NMEA_ERROR;
   }
-  gpsRMC.mm = d2i( &nmeaSentence[iStart+2]);
-  if (gpsRMC.mm < 0)
+  gpsRMC.hh = iTmp;
+
+  iTmp = d2i( &nmeaSentence[iStart+2]);
+  if (iTmp < 0)
   {
     interrupts();
     return NMEA_ERROR;
   }
-  gpsRMC.ss = d2i( &nmeaSentence[iStart+4]);
-  if (gpsRMC.ss < 0)
+  gpsRMC.mm = iTmp;
+
+  iTmp = d2i( &nmeaSentence[iStart+4]);
+  if (iTmp < 0)
   {
     interrupts();
     return NMEA_ERROR;
   }
+  gpsRMC.ss = iTmp;
+
   interrupts();
   
   //****************************
@@ -2928,21 +2920,26 @@ int ParseRMC(int fieldCount)
     return NMEA_ERROR; 
   }
   
-  gpsRMC.day = d2i( &nmeaSentence[iStart]);
-  if (gpsRMC.day < 0)
+  iTmp = d2i( &nmeaSentence[iStart]);
+  if (iTmp < 0)
   {
     return NMEA_ERROR;
   }
-  gpsRMC.mon = d2i( &nmeaSentence[iStart+2]);
-  if (gpsRMC.mon < 0)
+  gpsRMC.day = iTmp;
+
+  iTmp = d2i( &nmeaSentence[iStart+2]);
+  if (iTmp < 0)
   {
     return NMEA_ERROR;
   }
-  gpsRMC.yr = d2i( &nmeaSentence[iStart+4]);
-  if (gpsRMC.yr < 0)
+  gpsRMC.mon = iTmp;
+
+  iTmp = d2i( &nmeaSentence[iStart+4]);
+  if (iTmp < 0)
   {
     return NMEA_ERROR;
   }
+  gpsRMC.yr = iTmp;
 
   //**************
   // field 12 - mode indicator
@@ -2976,6 +2973,13 @@ int ParseDTM(int fieldCount)
 {
   int iStart;
   int iLen;
+
+  // we need two data fields
+  //
+  if (fieldCount < 3)
+  {
+    return NMEA_ERROR;
+  }
 
   //**************
   // field 1 - datum code
@@ -3012,14 +3016,12 @@ int ParsePUBX04(int fieldCount)
 
   gpsPUBX04.valid = false;
 
-#if 0
-  // should be 12 fields including the CRLF at the end
+  // we need six data fields
   //
-  if (fieldCount < 12)
+  if (fieldCount < 7)
   {
     return NMEA_ERROR;
   }
-#endif
 
   //******************************
   // field 2 = hhmmss.ss
@@ -3032,21 +3034,26 @@ int ParsePUBX04(int fieldCount)
     return NMEA_ERROR; 
   }
 
-  gpsPUBX04.hh = d2i( &nmeaSentence[iStart]);
-  if (gpsPUBX04.hh < 0)
+  iTmp = d2i( &nmeaSentence[iStart]);
+  if (iTmp < 0)
   {
     return NMEA_ERROR;
   }
-  gpsPUBX04.mm = d2i( &nmeaSentence[iStart+2]);
-  if (gpsPUBX04.mm < 0)
+  gpsPUBX04.hh = iTmp;
+
+  iTmp = d2i( &nmeaSentence[iStart+2]);
+  if (iTmp < 0)
   {
     return NMEA_ERROR;
   }
-  gpsPUBX04.ss = d2i( &nmeaSentence[iStart+4]);
-  if (gpsPUBX04.ss < 0)
+  gpsPUBX04.mm = iTmp;
+
+  iTmp = d2i( &nmeaSentence[iStart+4]);
+  if (iTmp < 0)
   {
     return NMEA_ERROR;
   }
+  gpsPUBX04.ss = iTmp;
   
   //******************************
   // field 6 = LEAP seconds
@@ -3311,10 +3318,7 @@ void ultodec(uint8_t *dest, unsigned long ul, int total)
 //===========================================================================
 void bytetodec2(uint8_t *dest, uint8_t us)
 {
-  unsigned long pwr10;
   uint8_t digit;
-  uint8_t count = 0;
-  uint8_t start = 0;
 
   // sanity check
   //
