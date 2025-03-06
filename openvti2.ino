@@ -121,6 +121,7 @@ enum OperatingMode
 };
 volatile OperatingMode CurrentMode;    // Current operating mode
 bool blnVideoIn = false;              // true iff video signal on input line
+int errVideo = 0;
 
 
 #define SYNC_SECONDS 10                // # of seconds for syncing to GPS time
@@ -131,7 +132,7 @@ volatile int ErrorCountdown;
 
 // Version message
 //
-char msgVersion[] = "6.2b";
+char msgVersion[] = "6.3";
 #define len_msgVersion 4
 
 // Error Messsages
@@ -206,11 +207,11 @@ uint8_t TestRow[30];
 #define FIELDTOT_ROW BOTTOM_ROW
 #define FIELDTOT_MAX 9999999        // max field count (row is only 29 char wide reliably)
 
-int osdTop_RowOffset = TOP_ROW_NTSC*30;   // display memory offset to start of ROW for cycling through data
-int osdTop_Col = 1;                       // starting colum in this ROW
+volatile int osdTop_RowOffset = TOP_ROW_NTSC*30;   // display memory offset to start of ROW for cycling through data
+volatile int osdTop_Col = 1;                       // starting colum in this ROW
 
-int osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;   // display memory offset to start of ROW for time data
-int osdBottom_Col = 1;
+volatile int osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;   // display memory offset to start of ROW for time data
+volatile int osdBottom_Col = 1;
 
 // pixel offset of display to Match IOTA-VTI
 //
@@ -352,8 +353,6 @@ volatile bool blnEchoNMEA = true;
 //  SETUP ROUTINE
 //========================================
 void setup() {
-  uint8_t rows;
-  uint8_t cols;    
   
   //************
   //  General init
@@ -442,132 +441,34 @@ void setup() {
 
   }
 
-
-
   //************
   //  Init max OSD chip
+  //    Just get it ready but don't enable the overlay until we detect a video input during the Loop() routine
   //
   
   // Initialize the SPI connection to the OSD board
   //
   SPI.begin();
   SPI.setClockDivider( SPI_CLOCK_DIV2 );      // Must be less than 10MHz.
-  
-  // Initialize the MAX7456 OSD:
+
+  //*****************  
+  // HSYNC input
+  //  no interrupt - just polled as an input
   //
-    
-  delay(1000);     // wait a bit to ensure that LOS is accurate
-   
+  HSYNC_CFG_INPUT();
+
+  // Initialization of OSD 
+  //
   // init the device into FULL SCREEN MODE
   //
   OSD.begin();                                      // start up (with NTSC_FULLSCREEN by default)
   OSD.setSyncSource(MAX7456_AUTOSYNC);              // use autosync mode
 
-  // check for video input
-  //
-  if (OSD.lossOfSync())
-  {
+  OSD.noDisplay();    // overlay OFF
+  blnVideoIn = false;
+  EnableOverlay = false;
+  
 
-    Serial.println("no video");
-    blnVideoIn = false;
-    EnableOverlay = false;
-
-    // no video at input
-    //
-    rows = OSD.safeVideoRows[MAX7456_NTSC][MAX7456_FULLSCREEN];
-    cols = OSD.safeVideoCols[MAX7456_NTSC][MAX7456_FULLSCREEN];    
-    OSD.setDefaultSystem(MAX7456_NTSC);       // default to NTSC
-
-    // setup rows for display
-    //
-    osdTop_RowOffset = TOP_ROW_NTSC*30;    
-    osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
- 
-  }
-  else
-  {
-    // YES, we have a video signal
-    //
-    blnVideoIn = true;
-
-    // set row and columns according to the video standard
-    //
-    videoStd = OSD.videoSystem();
-    if ( videoStd == MAX7456_NTSC )
-    {
-      Serial.println("Video = NTSC");
-      rows = OSD.safeVideoRows[MAX7456_NTSC][MAX7456_FULLSCREEN];
-      cols = OSD.safeVideoCols[MAX7456_NTSC][MAX7456_FULLSCREEN];    
-      OSD.setDefaultSystem(MAX7456_NTSC);
-      
-      osdTop_RowOffset = TOP_ROW_NTSC*30;    
-      osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
-    }
-    else if (videoStd == MAX7456_PAL)
-    {
-      Serial.println("Video = PAL");
-      rows = OSD.safeVideoRows[MAX7456_PAL][MAX7456_FULLSCREEN];
-      cols = OSD.safeVideoCols[MAX7456_PAL][MAX7456_FULLSCREEN];    
-      OSD.setDefaultSystem(MAX7456_PAL);
-      
-      osdTop_RowOffset = TOP_ROW_PAL*30;
-      osdBottom_RowOffset = BOTTOM_ROW_PAL*30;
-    }
-    else
-    {
-      rows = OSD.safeVideoRows[MAX7456_NTSC][MAX7456_FULLSCREEN];
-      cols = OSD.safeVideoCols[MAX7456_NTSC][MAX7456_FULLSCREEN];    
-      OSD.setDefaultSystem(MAX7456_NTSC);
-      
-      osdTop_RowOffset = TOP_ROW_NTSC*30;    
-      osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
-
-      EnableOverlay = false;
-      return;      // unknown video standard... do nothing
-    }
-
-      
-    OSD.setTextArea(rows, cols, MAX7456_FULLSCREEN);
-    
-    OSD.setWhiteLevel(0);  // should be 0% black 120% white
-    OSD.setCharEncoding(MAX7456_ASCII);       // use this char set
-
-    // setup background for OSD area
-    //
-  #if (GRAYBACKGROUND != 1)
-    OSD.videoBackground();
-  #else
-    OSD.setGrayLevel(4);
-    OSD.home();                               //
-    OSD.videoBackground();
-    for ( int r = 0; r < rows; r++ )
-    {
-      for ( int c = 0; c < cols; c++ )
-      {
-        OSD.write((uint8_t)0);
-      }
-    }
-    OSD.grayBackground();     // remaing writes will be gray background
-  #endif
-
-    // align with IOTA-VTI
-    OSD.setTextOffset(OSD_X_OFFSET, OSD_Y_OFFSET);
-
-    // set initial message
-    //
-    OSD.sendArray(osdTop_RowOffset,TopRow,30);
-    OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
-    
-    OSD.display();                              // Activate the text display.
-
-
-    //*****************  
-    // HSYNC input
-    //  no interrupt - just polled as an input
-    //
-    HSYNC_CFG_INPUT();
-    
-  }  
 
   //**********************
   //  Init timers for input capture and timing
@@ -641,45 +542,11 @@ void setup() {
   timer4_ov = 0;    // timer4: reset overflow count (used for timer5 overflow as well)
   GTCCR = 0;    // RESTART prescaler and all synchronous timers => Timer4 and Timer5 are now sync'd
 
-  // enable the interrupts for PPS and VSYNC
-  //  BUT ... only enable VSYNC if the video signal is present
+  // enable the interrupts for PPS
+  //  VSYNC will be enabled later after video input detected
   //
-  if (blnVideoIn)
-  {
-    TIMSK5 = (1 << ICIE5);                  // VSYNC timer 5: turn on IC interrupt for VSYNC and NO overflow interrupts
-  }
   TIMSK4 = (1 << ICIE4) | (1 << TOIE4);   // PPS timer 4: turn on IC capture and overflow interrupts
 
-
-  //*********************
-  //  VSYNC should be happening now
-  //    let's check ... wait 100ms for a Vsync to happen
-  //
-  
-  delay(100);
-  if (tk_VSYNC == 0)
-  {
-    // oops! No vsync coming in
-    //   display error message but drop into WaitingForGPS mode just in case it comes back...
-    //
-    Serial.println("*** NO VSYNC ***");
-    
-    //
-    for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
-    {
-      BottomRow[i] = 0x00;
-    }   
-    OSD.atomax(&BottomRow[1], (uint8_t*)msgNoVSYNC, len_msgNoVSYNC);
-    
-    OSD.sendArray(osdTop_RowOffset,TopRow,30);
-    OSD.sendArray(osdBottom_RowOffset,BottomRow,30);
-    
-    CurrentMode = WaitingForGPS;        // set mode
-  }
-    
-
-  //*********************
-  //  OK, startup the regular timing operation
 
   // reset command stream from PC
   //     clear incomming data buffer from PC
@@ -691,13 +558,12 @@ void setup() {
   strCommand[0] = 0;  // no command
   Cmd_Next = 0;
 
-  // start the overlay
-  //
 
-  if (blnVideoIn)
-  {
-    EnableOverlay = true;  
-  }
+  //*********************
+  // Setup done, wait a bit for power to come up on other gear
+  //
+  delay(500); 
+
 
 } // end of setup
 
@@ -712,6 +578,13 @@ void setup() {
 void loop() 
 {
 
+  // check video input
+  //    We only check the video input UNTIL it first appears.  Afterwards the video is connected, we do not check again.
+  //
+  if (!blnVideoIn)
+  {
+    chkVideoInput();
+  }
 
   // get & parse serial data from GPS
   //
@@ -878,6 +751,165 @@ void ExecCMD()
   //
   
 } // end of ExecCMD
+
+//=====================================
+//  chkVideoInput()
+//    check for video input
+//    if video present, enable overlay
+//    else (no video), disable overlay
+//
+//  NOTE:
+//    OSD.lossOfSync() must not be called during other OSD operations. => protect it from interrupts
+//
+//======================================
+void chkVideoInput()
+{
+  uint8_t rows;
+  uint8_t cols;    
+  bool blnLOS;
+
+
+  // check for video input
+  //
+  noInterrupts();
+  blnLOS = OSD.lossOfSync();
+  interrupts();
+
+  if (blnLOS)
+  {
+
+    errVideo = 1;
+
+    // no Video Input => turn OFF overlay
+    //
+    blnVideoIn = false;
+    EnableOverlay = false;
+    OSD.noDisplay();        // turn off overlay
+
+    return;
+
+  }
+  else
+  {
+    // YES, we have a video signal
+    //  if OSD overlay already enabled, all done now
+    //
+    if (EnableOverlay)
+    {
+      errVideo = 2;
+      return;
+    }
+
+    // set row and columns according to the video standard
+    //
+    videoStd = OSD.videoSystem();
+    if ( videoStd == MAX7456_NTSC )
+    {
+      Serial.println("Video = NTSC");
+      rows = OSD.safeVideoRows[MAX7456_NTSC][MAX7456_FULLSCREEN];
+      cols = OSD.safeVideoCols[MAX7456_NTSC][MAX7456_FULLSCREEN];    
+      OSD.setDefaultSystem(MAX7456_NTSC);
+      
+      osdTop_RowOffset = TOP_ROW_NTSC*30;    
+      osdBottom_RowOffset = BOTTOM_ROW_NTSC*30;
+    }
+    else if (videoStd == MAX7456_PAL)
+    {
+      Serial.println("Video = PAL");
+      rows = OSD.safeVideoRows[MAX7456_PAL][MAX7456_FULLSCREEN];
+      cols = OSD.safeVideoCols[MAX7456_PAL][MAX7456_FULLSCREEN];    
+      OSD.setDefaultSystem(MAX7456_PAL);
+      
+      osdTop_RowOffset = TOP_ROW_PAL*30;
+      osdBottom_RowOffset = BOTTOM_ROW_PAL*30;
+    }
+    else
+    {
+      // unknown video standard => NO VIDEO INPUT
+      //
+      errVideo = 4;
+
+      blnVideoIn = false;
+      EnableOverlay = false;
+      OSD.noDisplay();        // turn off overlay
+
+      return;      // unknown video standard... do nothing
+    }
+    OSD.setTextArea(rows, cols, MAX7456_FULLSCREEN);
+ 
+    OSD.setWhiteLevel(0);  // should be 0% black 120% white
+    OSD.setCharEncoding(MAX7456_ASCII);       // use this char set
+
+    // setup background for OSD area
+    //
+  #if (GRAYBACKGROUND != 1)
+    OSD.videoBackground();
+  #else
+    OSD.setGrayLevel(4);
+    OSD.home();                               //
+    OSD.videoBackground();
+    for ( int r = 0; r < rows; r++ )
+    {
+      for ( int c = 0; c < cols; c++ )
+      {
+        OSD.write((uint8_t)0);
+      }
+    }
+    OSD.grayBackground();     // remaing writes will be gray background
+  #endif
+
+    // align with IOTA-VTI
+    OSD.setTextOffset(OSD_X_OFFSET, OSD_Y_OFFSET);
+
+    // we can move to WaitingForGPS now
+    //
+    CurrentMode = WaitingForGPS;
+    
+    // write message
+    //
+    for( int i = 0; i < FIELDTOT_COL; i++ )   // clear all but the field count
+    {
+      BottomRow[i] = 0x00;
+    }   
+    OSD.atomax(&BottomRow[1], (uint8_t*)msgWaiting, len_msgWaiting);
+
+    // set display message (just to make sure)
+    //
+    OSD.sendArray(osdTop_RowOffset,TopRow,30);
+    OSD.sendArray(osdBottom_RowOffset,BottomRow,30);  
+
+
+    //*********************
+    // enable VSYNC interrupt
+    //
+    TIMSK5 = (1 << ICIE5);                  // VSYNC timer 5: turn on IC interrupt for VSYNC and NO overflow interrupts
+
+    //  VSYNC should be happening now
+    //    let's check ... wait 100ms for a Vsync and field detect
+    //
+    
+    delay(100);
+    if (tk_VSYNC == 0)
+    {
+      errVideo = 3;
+      // oops! No vsync coming in
+      //   display error message and leave overlay OFF
+      //
+      Serial.println("*** NO VSYNC ***");    
+      
+      return;
+    }
+
+    // All good - video input now present
+    //
+    OSD.display();                              // Activate the text display.
+    blnVideoIn = true;
+    EnableOverlay = true;
+
+
+  } // end of check for video input
+
+}  // end of chkVideoInput
 
 //*****************************************************************************************
 // ISR routines
@@ -1872,6 +1904,14 @@ PPS_ISR()
   //
   interrupts();
   
+  //************************
+  //  report No Video if necessary
+  //
+  if (!blnVideoIn)
+  {
+    Serial.print("No Video Input: ");
+    Serial.println(errVideo);
+  }
     
 } // end of PPS_ISR
 
