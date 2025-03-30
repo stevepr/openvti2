@@ -837,7 +837,7 @@ void chkVideoInput()
     }
     OSD.setTextArea(rows, cols, MAX7456_FULLSCREEN);
  
-    OSD.setWhiteLevel(0);  // should be 0% black 120% white
+    OSD.setWhiteLevel(3);  // should be 0% black 80% white
     OSD.setCharEncoding(MAX7456_ASCII);       // use this char set
 
     // setup background for OSD area
