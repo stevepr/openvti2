@@ -132,7 +132,7 @@ volatile int ErrorCountdown;
 
 // Version message
 //
-char msgVersion[] = "6.3";
+char msgVersion[] = "6.4";
 #define len_msgVersion 4
 
 // Error Messsages
